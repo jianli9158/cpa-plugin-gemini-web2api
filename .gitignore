@@ -1,0 +1,15 @@
+# Build artifacts
+/dist/
+/out/
+*.dylib
+*.so
+*.dll
+gemini-web2api.h
+*.zip
+checksums.txt
+
+# OS / Editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp

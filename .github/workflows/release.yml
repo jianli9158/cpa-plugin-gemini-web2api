@@ -1,0 +1,149 @@
+name: Release CLIProxyAPI Plugin
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+env:
+  PLUGIN_ID: gemini-web2api
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            os: macos-15
+            ext: .dylib
+          - goos: darwin
+            goarch: amd64
+            os: macos-15
+            ext: .dylib
+          - goos: linux
+            goarch: amd64
+            os: ubuntu-24.04
+            ext: .so
+          - goos: linux
+            goarch: arm64
+            os: ubuntu-24.04
+            ext: .so
+          - goos: windows
+            goarch: amd64
+            os: ubuntu-24.04
+            ext: .dll
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: Setup Zig 0.16.0 (Linux arm64 target)
+        if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Setup LLVM-MinGW (Windows target)
+        if: matrix.goos == 'windows'
+        shell: bash
+        run: |
+          curl -fsSL https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64/bin" >> "$GITHUB_PATH"
+          echo "CC=x86_64-w64-mingw32-clang" >> "$GITHUB_ENV"
+          echo "CXX=x86_64-w64-mingw32-clang++" >> "$GITHUB_ENV"
+
+      - name: Determine Version
+        id: ver
+        shell: bash
+        run: |
+          RAW_TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${RAW_TAG#v}"
+          echo "tag=${RAW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Go Vet & Unit Tests (Native Targets)
+        if: (matrix.goos == 'darwin' && matrix.goarch == 'arm64') || (matrix.goos == 'linux' && matrix.goarch == 'amd64')
+        shell: bash
+        run: |
+          export CGO_ENABLED=1
+          go vet ./...
+          go test ./internal/cpa ./internal/proxydial
+
+      - name: Build Dynamic Library & Package Zip
+        shell: bash
+        run: |
+          mkdir -p out
+          LIB_NAME="${PLUGIN_ID}${{ matrix.ext }}"
+          ZIP_NAME="${PLUGIN_ID}_${{ steps.ver.outputs.version }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+          export CGO_ENABLED=1
+          export GOOS=${{ matrix.goos }}
+          export GOARCH=${{ matrix.goarch }}
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            export MACOSX_DEPLOYMENT_TARGET="12.0"
+            export CGO_CFLAGS="-mmacosx-version-min=12.0 -arch ${{ matrix.goarch == 'amd64' && 'x86_64' || 'arm64' }}"
+            export CGO_CXXFLAGS="-mmacosx-version-min=12.0 -arch ${{ matrix.goarch == 'amd64' && 'x86_64' || 'arm64' }}"
+            export CGO_LDFLAGS="-mmacosx-version-min=12.0 -arch ${{ matrix.goarch == 'amd64' && 'x86_64' || 'arm64' }}"
+          fi
+          if [ "${{ matrix.goos }}" = "linux" ] && [ "${{ matrix.goarch }}" = "arm64" ]; then
+            export CC="zig cc -target aarch64-linux-gnu"
+            export CXX="zig c++ -target aarch64-linux-gnu"
+          fi
+          go build -trimpath -ldflags="-s -w" -buildmode=c-shared -o "out/${LIB_NAME}" ./cmd/gemini-web2api-plugin
+          (cd out && zip -qr "../${ZIP_NAME}" "${LIB_NAME}")
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: "${{ env.PLUGIN_ID }}_*_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums.txt & Publish Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd artifacts
+          sha256sum *.zip > checksums.txt
+          cat checksums.txt
+          RAW_TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          if ! gh release view "$RAW_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$RAW_TAG" --title "$RAW_TAG" --generate-notes --repo "${{ github.repository }}"
+          fi
+          for asset in *.zip checksums.txt; do
+            for attempt in 1 2 3 4 5; do
+              if gh release upload "$RAW_TAG" "$asset" --clobber --repo "${{ github.repository }}"; then
+                break
+              fi
+              sleep 3
+            done
+          done
