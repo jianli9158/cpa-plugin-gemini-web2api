@@ -131,7 +131,9 @@ func (p *Plugin) parseAndSyncAuthPayload(ctx context.Context, fileName string, r
 
 	prevDisabled := payload.Disabled
 	prevServiceStopped := payload.ServiceStopped
-
+	prevTier := payload.Tier
+	prevState := payload.State
+	prevEmail := payload.Email
 	state, hasState := extractStorageStateFromPayload(rawJSON, payload)
 	rt, rtErr := p.Runtime()
 	serviceStopped := p.serviceStopped.Load()
@@ -204,6 +206,27 @@ func (p *Plugin) parseAndSyncAuthPayload(ctx context.Context, fileName string, r
 		}
 	} else if importedStatus != nil {
 		disabled = !importedStatus.Enabled
+	}
+	if importedStatus != nil {
+		if importedStatus.Tier != "" {
+			payload.Tier = formatTierDisplay(importedStatus.Tier)
+		}
+		if importedStatus.State != "" {
+			payload.State = importedStatus.State
+		}
+		if importedStatus.Source != "" {
+			payload.Source = importedStatus.Source
+		}
+	}
+	payload.Tier = formatTierDisplay(payload.Tier)
+	if rtErr == nil && accountID != "" {
+		if client := rt.Pool.Client(accountID); client != nil && client.Email() != "" {
+			realEmail := strings.ToLower(strings.TrimSpace(client.Email()))
+			payload.Email = realEmail
+			if payload.Label == "" || payload.Label == accountID {
+				payload.Label = realEmail
+			}
+		}
 	}
 
 	label := strings.TrimSpace(payload.Label)
@@ -278,7 +301,7 @@ func (p *Plugin) parseAndSyncAuthPayload(ctx context.Context, fileName string, r
 		Attributes:       attributes,
 		NextRefreshAfter: time.Now().Add(30 * time.Minute),
 	}
-	if fileName != "" && (prevDisabled == nil || *prevDisabled != disabled || prevServiceStopped != serviceStopped) {
+	if fileName != "" && (prevDisabled == nil || *prevDisabled != disabled || prevServiceStopped != serviceStopped || prevTier != payload.Tier || prevState != payload.State || prevEmail != payload.Email) {
 		_ = writeAuthDataToDefaultHostDir(authData)
 	}
 	return authData, nil
@@ -336,6 +359,9 @@ func (p *Plugin) upsertAccountInRuntime(
 		if existing := findPoolAccountStatus(rt, targetID); existing != nil && existing.State != balancer.StateAuthRequired {
 			if _, existingState, err := rt.ReadAccountStorageState(targetID); err == nil && existingState != nil {
 				if sameCoreAuthCookies(*existingState, state) {
+					if existing.State == balancer.StateInitializing {
+						rt.Accounts.WaitFirstInit(p.ctx, existing.AccountID)
+					}
 					return existing.AccountID, nil
 				}
 			}
@@ -609,6 +635,10 @@ func (p *Plugin) buildAuthDataForAccountID(rt *app.PluginRuntime, accountID stri
 		return pluginapi.AuthData{}, fmt.Errorf("runtime not initialized")
 	}
 	accStatus := findPoolAccountStatus(rt, accountID)
+	if accStatus != nil && accStatus.State == balancer.StateInitializing {
+		rt.Accounts.WaitFirstInit(p.ctx, accStatus.AccountID)
+		accStatus = findPoolAccountStatus(rt, accountID)
+	}
 	cleanID := strings.ToLower(strings.TrimSpace(accountID))
 	enabled := true
 	var proxyURL, tier, stateStr, sourceStr, profileStr string
@@ -616,7 +646,7 @@ func (p *Plugin) buildAuthDataForAccountID(rt *app.PluginRuntime, accountID stri
 		cleanID = strings.ToLower(strings.TrimSpace(accStatus.AccountID))
 		enabled = accStatus.Enabled
 		proxyURL = accStatus.Proxy
-		tier = accStatus.Tier
+		tier = formatTierDisplay(accStatus.Tier)
 		stateStr = accStatus.State
 		sourceStr = accStatus.Source
 		profileStr = accStatus.Profile
@@ -687,6 +717,21 @@ func (p *Plugin) buildAuthDataForAccountID(rt *app.PluginRuntime, accountID stri
 		},
 	}, nil
 }
+func formatTierDisplay(tier string) string {
+	switch strings.ToLower(strings.TrimSpace(tier)) {
+	case "pro":
+		return "Pro"
+	case "ultra":
+		return "Ultra"
+	case "plus":
+		return "Plus"
+	case "free":
+		return "Free"
+	default:
+		return strings.TrimSpace(tier)
+	}
+}
+
 
 func (p *Plugin) SyncAccountIDToHostAuth(callbackID string, accountID string) error {
 	if !boolOrDefault(p.Config().SyncAuthFiles, true) {

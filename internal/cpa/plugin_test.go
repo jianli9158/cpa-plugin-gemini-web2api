@@ -280,7 +280,7 @@ func TestAuthFileDisabledSyncOnServiceStopAndShutdown(t *testing.T) {
 		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, []byte(`{}`))
 	}()
 
-	cfgYAML := []byte("data_dir: \"" + dataDir + "\"\nauto_start: false\nsync_auth_files: true\n")
+	cfgYAML := []byte("data_dir: \"" + dataDir + "\"\nauto_start: false\nguest_enabled: false\ninit_timeout: 500ms\nsync_auth_files: true\n")
 	regReq, _ := json.Marshal(map[string]any{
 		"config_yaml":    cfgYAML,
 		"schema_version": pluginabi.SchemaVersion,
@@ -289,7 +289,7 @@ func TestAuthFileDisabledSyncOnServiceStopAndShutdown(t *testing.T) {
 		t.Fatalf("plugin.register failed: %v", err)
 	}
 	// Simulate auto_start=true runtime state for startup sync test
-	cfgYAMLAuto := []byte("data_dir: \"" + dataDir + "\"\nauto_start: true\nsync_auth_files: true\n")
+	cfgYAMLAuto := []byte("data_dir: \"" + dataDir + "\"\nauto_start: true\nguest_enabled: false\ninit_timeout: 500ms\nsync_auth_files: true\n")
 	regReqAuto, _ := json.Marshal(map[string]any{
 		"config_yaml":    cfgYAMLAuto,
 		"schema_version": pluginabi.SchemaVersion,

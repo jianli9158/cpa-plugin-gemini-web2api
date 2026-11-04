@@ -59,9 +59,10 @@ type Manager struct {
 }
 
 type managed struct {
-	account auth.LoadedAccount
-	cancel  context.CancelFunc
-	done    chan struct{}
+	account   auth.LoadedAccount
+	cancel    context.CancelFunc
+	done      chan struct{}
+	firstDone chan struct{}
 }
 
 // operate 占用账号的操作锁，返回释放函数
@@ -99,7 +100,7 @@ func (m *Manager) Start(accounts []auth.LoadedAccount) {
 	var wait sync.WaitGroup
 	for _, account := range accounts {
 		wait.Add(1)
-		m.launch(account, wait.Done)
+		m.launch(account, nil, wait.Done)
 	}
 	wait.Add(1)
 	m.launchGuest(wait.Done)
@@ -206,24 +207,48 @@ func (m *Manager) RelaunchGuest() {
 
 // Add 登记并启动一个新导入的账号，返回后首轮初始化结束
 func (m *Manager) Add(account auth.LoadedAccount) error {
+	defer m.operate(account.ID)()
 	m.mu.Lock()
-	_, exists := m.accounts[account.ID]
+	entry := m.accounts[account.ID]
 	m.mu.Unlock()
-	if exists {
-		return fmt.Errorf("账号 %q 已存在", account.ID)
+	if entry != nil {
+		if entry.firstDone != nil {
+			select {
+			case <-entry.firstDone:
+			case <-m.ctx.Done():
+				return m.ctx.Err()
+			}
+		}
+		return nil
 	}
-	done := make(chan struct{})
+	firstDone := make(chan struct{})
 	var once sync.Once
-	m.launch(account, func() { once.Do(func() { close(done) }) })
+	m.launch(account, firstDone, func() { once.Do(func() { close(firstDone) }) })
 	select {
-	case <-done:
+	case <-firstDone:
 	case <-m.ctx.Done():
+		return m.ctx.Err()
 	}
 	return nil
 }
 
+// WaitFirstInit 等待账号首轮初始化结束（若正在初始化中）
+func (m *Manager) WaitFirstInit(ctx context.Context, accountID string) {
+	m.mu.Lock()
+	entry := m.accounts[accountID]
+	m.mu.Unlock()
+	if entry == nil || entry.firstDone == nil {
+		return
+	}
+	select {
+	case <-entry.firstDone:
+	case <-ctx.Done():
+	case <-m.ctx.Done():
+	}
+}
+
 // launch 创建账号客户端并启动其生命周期，firstDone 在首轮初始化结束或账号停用时调用
-func (m *Manager) launch(account auth.LoadedAccount, firstDone func()) {
+func (m *Manager) launch(account auth.LoadedAccount, firstDoneCh chan struct{}, firstDone func()) {
 	proxy, source := m.accountProxy(account)
 	account.ProxyURL = proxy
 	info := balancer.AccountInfo{Source: "cookie", Profile: account.Profile, Proxy: proxy, ProxySource: source}
@@ -238,7 +263,18 @@ func (m *Manager) launch(account auth.LoadedAccount, firstDone func()) {
 	if _, exists := m.accounts[account.ID]; !exists {
 		m.order = append(m.order, account.ID)
 	}
-	entry := &managed{account: account}
+	if firstDoneCh == nil {
+		firstDoneCh = make(chan struct{})
+		orig := firstDone
+		var once sync.Once
+		firstDone = func() {
+			once.Do(func() { close(firstDoneCh) })
+			if orig != nil {
+				orig()
+			}
+		}
+	}
+	entry := &managed{account: account, firstDone: firstDoneCh}
 	m.accounts[account.ID] = entry
 	settings := m.settings
 	m.mu.Unlock()
@@ -578,11 +614,11 @@ func usesGlobalProxy(account auth.LoadedAccount) bool {
 
 // restart 以新客户端重新启动账号并等待首轮初始化结束
 func (m *Manager) restart(account auth.LoadedAccount) error {
-	done := make(chan struct{})
+	firstDone := make(chan struct{})
 	var once sync.Once
-	m.launch(account, func() { once.Do(func() { close(done) }) })
+	m.launch(account, firstDone, func() { once.Do(func() { close(firstDone) }) })
 	select {
-	case <-done:
+	case <-firstDone:
 		return nil
 	case <-m.ctx.Done():
 		return m.ctx.Err()

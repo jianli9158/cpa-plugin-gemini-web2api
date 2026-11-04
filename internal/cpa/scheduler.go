@@ -214,11 +214,28 @@ func (p *Plugin) handleQuotaFetch(raw []byte) (any, error) {
 			break
 		}
 	}
+	if matched != nil && matched.State == balancer.StateInitializing {
+		rt.Accounts.WaitFirstInit(p.ctx, matched.AccountID)
+		poolStatus = rt.Pool.Status()
+		for i := range poolStatus.Accounts {
+			if strings.EqualFold(poolStatus.Accounts[i].AccountID, matched.AccountID) {
+				matched = &poolStatus.Accounts[i]
+				break
+			}
+		}
+	}
 	if matched == nil && len(poolStatus.Accounts) > 0 {
 		matched = &poolStatus.Accounts[0]
 	}
 
-	tierName := "FREE"
+	tierName := "Free"
+	if req.Attributes != nil && strings.TrimSpace(req.Attributes["tier"]) != "" {
+		tierName = formatTierDisplay(req.Attributes["tier"])
+	} else if req.Metadata != nil {
+		if t, ok := req.Metadata["tier"].(string); ok && strings.TrimSpace(t) != "" {
+			tierName = formatTierDisplay(t)
+		}
+	}
 	remaining := 1.0
 	resetTime := ""
 	desc := "Ready"
@@ -227,7 +244,7 @@ func (p *Plugin) handleQuotaFetch(raw []byte) (any, error) {
 
 	if matched != nil {
 		if matched.Tier != "" {
-			tierName = strings.ToUpper(matched.Tier)
+			tierName = formatTierDisplay(matched.Tier)
 		}
 		modelsCount = float64(len(matched.Models))
 		desc = fmt.Sprintf("State: %s", matched.State)

@@ -518,9 +518,9 @@ func (p *Plugin) buildAccountsAndCooldowns(rt *app.PluginRuntime) ([]adminAccoun
 			accCooldowns = append(accCooldowns, cd)
 			allCooldowns = append(allCooldowns, cd)
 		}
-		tier := acc.Tier
+		tier := formatTierDisplay(acc.Tier)
 		if tier == "" {
-			tier = "FREE"
+			tier = "Free"
 		}
 		views = append(views, adminAccountView{
 			ID:            acc.AccountID,
@@ -531,7 +531,7 @@ func (p *Plugin) buildAccountsAndCooldowns(rt *app.PluginRuntime) ([]adminAccoun
 			Profile:       acc.Profile,
 			Proxy:         redactProxyURLString(acc.Proxy),
 			ProxySource:   acc.ProxySource,
-			BenefitTier:   strings.ToUpper(tier),
+			BenefitTier:   tier,
 			ContextWindow: acc.ContextWindow,
 			Models:        acc.Models,
 			Pending:       acc.Pending,

@@ -13,7 +13,7 @@ import (
 
 const (
 	PluginID      = "gemini-web2api"
-	PluginVersion = "1.0.0"
+	PluginVersion = "1.0.1"
 	ProviderID    = "gemini-web2api"
 )
 

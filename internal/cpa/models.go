@@ -2,8 +2,8 @@ package cpa
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
-
 	"github.com/Mag1cFall/Gemini-Web2API/internal/adapter"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
@@ -179,15 +179,37 @@ func (p *Plugin) collectCatalogModelsForAccount(accountID string) []pluginapi.Mo
 	var rawModels []adapter.CatalogModel
 	if rt, err := p.Runtime(); err == nil {
 		if accountID != "" && accountID != gemini.GuestID {
+			if st := findPoolAccountStatus(rt, accountID); st != nil && st.State == "initializing" {
+				rt.Accounts.WaitFirstInit(p.ctx, st.AccountID)
+			}
 			if client := rt.Pool.Client(accountID); client != nil {
+				byID := make(map[string]adapter.CatalogModel)
 				for _, m := range client.Models() {
-					rawModels = append(rawModels, adapter.CatalogModel{
+					cm := adapter.CatalogModel{
 						Model:              m,
 						MinInputTokenLimit: client.ContextWindow(),
 						MaxInputTokenLimit: client.ContextWindow(),
 						AccountCount:       1,
 						Accounts:           []string{accountID},
-					})
+					}
+					rawModels = append(rawModels, cm)
+					byID[m.ID] = cm
+				}
+				if len(rawModels) > 0 {
+					aliases := config.ModelAliases()
+					names := make([]string, 0, len(aliases))
+					for alias := range aliases {
+						names = append(names, alias)
+					}
+					sort.Strings(names)
+					for _, alias := range names {
+						target, ok := byID[aliases[alias]]
+						if _, exists := byID[alias]; !ok || exists {
+							continue
+						}
+						target.ID, target.AliasOf, target.Default = alias, aliases[alias], false
+						rawModels = append(rawModels, target)
+					}
 				}
 			}
 		}
@@ -198,7 +220,6 @@ func (p *Plugin) collectCatalogModelsForAccount(accountID string) []pluginapi.Mo
 	if len(rawModels) == 0 {
 		rawModels = defaultFallbackModels()
 	}
-
 	out := make([]pluginapi.ModelInfo, 0, len(rawModels))
 	seen := make(map[string]struct{}, len(rawModels))
 	addModel := func(info pluginapi.ModelInfo) {
