@@ -137,8 +137,7 @@ func (m *Manager) launchGuest(firstDone func()) {
 
 // runGuest 初始化访客会话直到成功，之后定期重读首页与模型目录，重读失败时保留原有参数
 func (m *Manager) runGuest(ctx context.Context, client *gemini.Client, firstDone func()) {
-	var once sync.Once
-	first := func() { once.Do(firstDone) }
+	first := sync.OnceFunc(firstDone)
 	defer first()
 	for {
 		settings := m.Settings()
@@ -154,11 +153,12 @@ func (m *Manager) runGuest(ctx context.Context, client *gemini.Client, firstDone
 			logging.Info(gemini.GuestID, "访客会话就绪", "模型", len(client.Models()), "耗时", time.Since(started))
 			break
 		}
+		retry := retryInterval(settings.RetryInterval, err)
 		if m.pool.MarkFailed(gemini.GuestID, err) {
-			logging.Warn(gemini.GuestID, "访客会话初始化失败", "耗时", time.Since(started), "下次重试", settings.RetryInterval, "错误", err)
+			logging.Warn(gemini.GuestID, "访客会话初始化失败", "耗时", time.Since(started), "下次重试", retry, "错误", err)
 		}
 		first()
-		if !sleep(ctx, settings.RetryInterval) {
+		if !sleep(ctx, retry) {
 			return
 		}
 	}
@@ -247,8 +247,11 @@ func (m *Manager) WaitFirstInit(ctx context.Context, accountID string) {
 	}
 }
 
-// launch 创建账号客户端并启动其生命周期，firstDone 在首轮初始化结束或账号停用时调用
+// launch 创建账号客户端并启动其生命周期，firstDone 在首轮初始化结束或账号停用时调用；有认证文件的账号以文件当前的 Cookie、续签材料与设置启动
 func (m *Manager) launch(account auth.LoadedAccount, firstDoneCh chan struct{}, firstDone func()) {
+	if account.File != nil {
+		account = account.File.Account()
+	}
 	proxy, source := m.accountProxy(account)
 	account.ProxyURL = proxy
 	info := balancer.AccountInfo{Source: "cookie", Profile: account.Profile, Proxy: proxy, ProxySource: source}
@@ -300,10 +303,20 @@ func (m *Manager) launch(account auth.LoadedAccount, firstDoneCh chan struct{}, 
 	}()
 }
 
+// networkRetryInterval 是连接失败或初始化超时后重新初始化的间隔上限
+const networkRetryInterval = 10 * time.Second
+
+// retryInterval 返回初始化失败后的重试间隔：连接失败与超时不超过 networkRetryInterval，其余错误为配置值
+func retryInterval(configured time.Duration, err error) time.Duration {
+	if errors.Is(err, gemini.ErrTransport) || errors.Is(err, context.DeadlineExceeded) {
+		return min(configured, networkRetryInterval)
+	}
+	return configured
+}
+
 // run 初始化账号直到成功，之后按轮换页给出的间隔轮换 Cookie 直到 ctx 结束
 func (m *Manager) run(ctx context.Context, account auth.LoadedAccount, client *gemini.Client, firstDone func()) {
-	var once sync.Once
-	first := func() { once.Do(firstDone) }
+	first := sync.OnceFunc(firstDone)
 	defer first()
 	for {
 		settings := m.Settings()
@@ -317,18 +330,18 @@ func (m *Manager) run(ctx context.Context, account auth.LoadedAccount, client *g
 			logReady(account, client, time.Since(started))
 			break
 		}
+		retry := retryInterval(settings.RetryInterval, err)
 		if m.pool.MarkFailed(account.ID, err) {
-			logging.Error(account.ID, "账号初始化失败", "耗时", time.Since(started), "下次重试", settings.RetryInterval, "错误", err)
+			logging.Error(account.ID, "账号初始化失败", "耗时", time.Since(started), "下次重试", retry, "错误", err)
 		} else {
 			logging.Debug(account.ID, "账号初始化失败", "错误", err)
 		}
 		first()
-		if !sleep(ctx, settings.RetryInterval) {
+		if !sleep(ctx, retry) {
 			return
 		}
 	}
 	first()
-
 	rotator := gemini.NewCookieRotator(client)
 	for {
 		started := time.Now()
@@ -392,7 +405,7 @@ func logReady(account auth.LoadedAccount, client *gemini.Client, duration time.D
 		fields = append([]any{"邮箱", email}, fields...)
 	}
 	if account.ProxyURL != "" {
-		fields = append(fields, "代理", maskProxy(account.ProxyURL))
+		fields = append(fields, "代理", proxypool.Redact(account.ProxyURL))
 	}
 	fields = append(fields, "耗时", duration)
 	logging.Info(account.ID, "账号就绪", fields...)
@@ -539,7 +552,7 @@ func (m *Manager) SetProxy(accountID string, proxy string) error {
 		}
 	}
 	entry.account.ProxyURL, _ = m.accountProxy(entry.account)
-	logging.Info(accountID, "账号代理已更新", "代理", cmp.Or(maskProxy(entry.account.ProxyURL), "直连"))
+	logging.Info(accountID, "账号代理已更新", "代理", cmp.Or(proxypool.Redact(entry.account.ProxyURL), "直连"))
 	return m.restart(entry.account)
 }
 
@@ -625,6 +638,18 @@ func (m *Manager) restart(account auth.LoadedAccount) error {
 	}
 }
 
+// await 调用 launch 并等待它的首轮初始化结束或服务停止
+func (m *Manager) await(launch func(firstDone func())) error {
+	done := make(chan struct{})
+	launch(sync.OnceFunc(func() { close(done) }))
+	select {
+	case <-done:
+		return nil
+	case <-m.ctx.Done():
+		return m.ctx.Err()
+	}
+}
+
 // IDs 返回按登记顺序排列的账号 ID
 func (m *Manager) IDs() []string {
 	m.mu.Lock()
@@ -635,12 +660,11 @@ func (m *Manager) IDs() []string {
 
 // ImportCookie 从 Cookie Header、浏览器导出的 JSON 或 Netscape cookies.txt 导入账号并启动
 func (m *Manager) ImportCookie(ctx context.Context, cookies string, id string, proxy string, authUser int) (string, error) {
-	settings := m.Settings()
-	result, _, err := chromeauth.ImportCookies(ctx, chromeauth.CookieImportOptions{Cookies: cookies, ID: id, Output: settings.AuthDir, Proxy: proxy, RequestProxy: m.importProxy(), AuthUser: authUser})
+	path, _, err := chromeauth.ImportCookies(ctx, chromeauth.CookieImportOptions{Cookies: cookies, ID: id, Output: m.Settings().AuthDir, Proxy: proxy, RequestProxy: m.importProxy(), AuthUser: authUser})
 	if err != nil {
 		return "", err
 	}
-	return m.addFile(result.Path)
+	return m.addFile(path)
 }
 
 // ImportState 校验 setup --remote 上传的认证状态，写入认证目录后新增或更新账号
@@ -649,18 +673,17 @@ func (m *Manager) ImportState(data []byte) (string, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return "", fmt.Errorf("认证状态无效: %w", err)
 	}
-	id := chromeauth.AccountID(state.Metadata.ID)
-	if id == "" || len(state.Cookies) == 0 {
-		return "", errors.New("认证状态缺少账号 ID 或 Cookie")
-	}
-	path := filepath.Join(m.Settings().AuthDir, id, "storage-state.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	state.Metadata.ID = chromeauth.AccountID(state.Metadata.ID)
+	path := filepath.Join(m.Settings().AuthDir, state.Metadata.ID, "storage-state.json")
+	state.Metadata = auth.Inherit(path, state.Metadata)
+	file, err := auth.New(path, state)
+	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return "", fmt.Errorf("写入认证状态: %w", err)
+	if err := file.Write(); err != nil {
+		return "", err
 	}
-	return m.addFile(path)
+	return m.addFile(file.Path())
 }
 
 // addFile 读取认证状态文件，账号已存在时以新文件重启该账号，否则新增
@@ -684,20 +707,6 @@ func (m *Manager) addFile(path string) (string, error) {
 	logging.Info(account.ID, "账号已导入")
 	return account.ID, m.Add(account)
 }
-
-// maskProxy 隐藏代理 URL 中的密码
-func maskProxy(value string) string {
-	if at := strings.LastIndex(value, "@"); at > 0 {
-		if scheme := strings.Index(value, "://"); scheme >= 0 && scheme < at {
-			credentials := value[scheme+3 : at]
-			if user, _, found := strings.Cut(credentials, ":"); found {
-				return value[:scheme+3] + user + ":***" + value[at:]
-			}
-		}
-	}
-	return value
-}
-
 func sleep(ctx context.Context, duration time.Duration) bool {
 	timer := time.NewTimer(duration)
 	defer timer.Stop()

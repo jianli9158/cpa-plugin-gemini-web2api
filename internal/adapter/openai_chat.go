@@ -1,10 +1,12 @@
 package adapter
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
@@ -23,6 +25,7 @@ type ChatMessage struct {
 	ToolCallID      string            `json:"tool_call_id,omitempty"`
 	ToolCalls       []OpenAIToolCall  `json:"tool_calls,omitempty"`
 	FunctionCall    *OpenAIFunction   `json:"function_call,omitempty"`
+	Refusal         string            `json:"refusal,omitempty"`
 	TranscriptItems []json.RawMessage `json:"-"`
 }
 
@@ -71,6 +74,7 @@ type ChatRequest struct {
 	ToolChoice          json.RawMessage    `json:"tool_choice,omitempty"`
 	Functions           json.RawMessage    `json:"functions,omitempty"`
 	FunctionCall        json.RawMessage    `json:"function_call,omitempty"`
+	ParallelToolCalls   *bool              `json:"parallel_tool_calls,omitempty"`
 	ResponseFormat      json.RawMessage    `json:"response_format,omitempty"`
 	ReasoningEffort     string             `json:"reasoning_effort,omitempty"`
 	Reasoning           json.RawMessage    `json:"reasoning,omitempty"`
@@ -175,7 +179,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		responseID := fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano())
 		created := time.Now().Unix()
 
-		generate := func(choice int, onEvent func(gemini.Event) error, hasVisibleOutput func() bool) (generationResult, error) {
+		generate := func(choice int, onEvent func(gemini.Event) error, projection *streamProjection) (generationResult, error) {
 			key, keyPolicy := sessionKey, policy
 			if choice > 0 {
 				key, keyPolicy = "", sessionCreate
@@ -185,7 +189,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildOpenAIChatPrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(key)))
 				},
-				onEvent, hasVisibleOutput,
+				onEvent, projection,
 			)
 			c.Set("account_id", accountID)
 			return result, err
@@ -212,7 +216,9 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				projection := newStreamProjection(bridge, includeThoughts)
 				result, err := generate(choice,
 					func(event gemini.Event) error {
-						stream.release()
+						if !usageOnly(event) {
+							stream.release()
+						}
 						return projection.project(event, func(event gemini.Event) error {
 							if err := writeRole(); err != nil {
 								return err
@@ -222,16 +228,14 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 								delta = gin.H{"reasoning_content": event.Delta}
 							}
 							return writeOpenAIDelta(c.Writer, responseID, created, streamModel, choice, delta)
-						}, func(err error) error {
-							return writeOpenAIStreamError(c.Writer, http.StatusBadGateway, "upstream_rewrite", err)
 						})
 					},
-					projection.hasVisibleOutput,
+					projection,
 				)
 				if err != nil {
 					if stream.reject() {
 						writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
-					} else if !projection.errorSent {
+					} else {
 						_ = writeOpenAIStreamError(c.Writer, upstreamStatus(err), openAIUpstreamCode(err), streamFailure(c, err))
 					}
 					return
@@ -266,6 +270,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 
+		defer startNonstreamKeepalive(c)()
 		var response gin.H
 		for choice := range n {
 			result, err := generate(choice, nil, nil)
@@ -284,6 +289,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			}
 			if choice == 0 {
 				rememberHistory(pool, result, "", bridge, turns)
+				c.Header("X-Conversation-ID", result.ConversationID)
 			}
 			usage = addUsage(usage, result.Accumulator.Usage)
 			if response == nil {
@@ -335,47 +341,68 @@ func recordChoiceUsage(c *gin.Context, n int, usage *gemini.Usage) {
 	}
 }
 
+// chatToolNames 返回调用 ID 到结果标签的映射，连续的调用消息算作同一轮
+func chatToolNames(messages []ChatMessage) map[string]string {
+	names := map[string]string{}
+	var turn []toolCallRef
+	for _, message := range messages {
+		if len(message.ToolCalls) == 0 {
+			labelToolCalls(names, turn)
+			turn = nil
+		}
+		for _, call := range message.ToolCalls {
+			turn = append(turn, toolCallRef{ID: call.ID, Name: call.Function.Name})
+		}
+	}
+	labelToolCalls(names, turn)
+	return names
+}
+
 func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRequest, continuation bool, bridge ToolBridge) (string, []gemini.FileData, error) {
+	toolNames := chatToolNames(request.Messages)
 	messages := request.Messages
 	if continuation {
 		messages = continuationMessages(messages)
 	}
-	records := make([]map[string]interface{}, 0, len(messages))
+	turns := make([]transcriptTurn, 0, len(messages))
 	var files []gemini.FileData
 	for _, message := range messages {
-		content, attachments, err := decodeMessageContent(c.Request.Context(), message.Content, client)
+		content, attachments, err := decodeMessageContent(c.Request.Context(), message.Content, client, nil)
 		if err != nil {
 			return "", nil, err
 		}
 		files = append(files, attachments...)
 		role := transcriptRole(message.Role)
-		record := map[string]interface{}{"role": role, "content": content}
-		if len(message.TranscriptItems) > 0 {
-			record["events"] = message.TranscriptItems
+		var builder strings.Builder
+		if role == "tool" {
+			writeResultBlock(&builder, cmp.Or(toolNames[message.ToolCallID], message.Name, message.ToolCallID), content)
+		} else {
+			builder.WriteString(speakerText(message.Name, cmp.Or(content, message.Refusal)))
 		}
-		if len(message.ToolCalls) > 0 {
-			record["tool_calls"] = message.ToolCalls
+		for _, item := range message.TranscriptItems {
+			appendTranscriptObject(&builder, item)
 		}
-		if message.ToolCallID != "" {
-			record["tool_call_id"] = message.ToolCallID
+		for _, call := range message.ToolCalls {
+			writeCallBlock(&builder, call.Function.Name, json.RawMessage(call.Function.Arguments))
 		}
-		if role == "tool" && message.Name != "" {
-			record["name"] = message.Name
-		}
-		records = append(records, record)
+		turns = append(turns, transcriptTurn{Role: role, Text: builder.String()})
 	}
-	if len(records) == 0 {
-		records = append(records, map[string]interface{}{"role": "user", "content": "Hello"})
-	}
-	transcript, err := renderTranscript(records)
-	if err != nil {
-		return "", nil, err
+	if len(turns) == 0 {
+		turns = append(turns, transcriptTurn{Role: "user", Text: "Hello"})
 	}
 	suffix, err := bridge.PromptSuffix()
 	if err != nil {
 		return "", nil, err
 	}
-	return transcript + suffix, files, nil
+	return renderTranscript(turns, suffix), files, nil
+}
+
+// speakerText 在带 name 的消息正文前写上说话人名称
+func speakerText(name string, text string) string {
+	if name == "" || text == "" {
+		return text
+	}
+	return name + ": " + text
 }
 
 func buildOpenAIResponse(responseID string, created int64, result generationResult, bridge ToolBridge, includeThoughts bool, audioOptions *ChatAudioOptions) (gin.H, error) {
@@ -614,7 +641,7 @@ func openAIToolBridge(request ChatRequest) (ToolBridge, error) {
 	if err != nil {
 		return ToolBridge{}, err
 	}
-	bridge := ToolBridge{Choice: openAIToolChoice(request.ToolChoice), LegacyFunctions: request.legacyFunctions, Stop: stop}
+	bridge := ToolBridge{Choice: openAIToolChoice(request.ToolChoice), LegacyFunctions: request.legacyFunctions, Stop: stop, SingleCall: request.ParallelToolCalls != nil && !*request.ParallelToolCalls}
 	if len(request.WebSearchOptions) > 0 && string(request.WebSearchOptions) != "null" {
 		bridge.WebSearch = true
 	}
@@ -662,7 +689,7 @@ func openAIToolBridge(request ChatRequest) (ToolBridge, error) {
 			return ToolBridge{}, fmt.Errorf("不支持的 response_format.type %q", responseFormat.Type)
 		}
 	}
-	return bridge, nil
+	return bridge, bridge.checkExplicitTool()
 }
 
 func openAIToolChoice(raw json.RawMessage) string {
@@ -680,17 +707,17 @@ func openAIToolChoice(raw json.RawMessage) string {
 		} `json:"custom"`
 	}
 	if json.Unmarshal(raw, &object) == nil && object.Function.Name != "" {
-		return object.Function.Name
+		return explicitChoicePrefix + object.Function.Name
 	}
 	if object.Custom.Name != "" {
-		return object.Custom.Name
+		return explicitChoicePrefix + object.Custom.Name
 	}
 	var flat struct {
 		Type string `json:"type"`
 		Name string `json:"name"`
 	}
 	if json.Unmarshal(raw, &flat) == nil && flat.Name != "" {
-		return flat.Name
+		return explicitChoicePrefix + flat.Name
 	}
 	if flat.Type != "" && flat.Type != "function" {
 		return flat.Type

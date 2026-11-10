@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -180,7 +181,7 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 		responseID := fmt.Sprintf("resp_%d", time.Now().UnixNano())
 		streaming := method == "streamGenerateContent"
 		count := geminiCandidateCount(request)
-		generate := func(index int, onEvent func(gemini.Event) error, hasVisibleOutput func() bool) (generationResult, error) {
+		generate := func(index int, onEvent func(gemini.Event) error, projection *streamProjection) (generationResult, error) {
 			key, policy := sessionKey, previousResponsePolicy(request.PreviousResponseID)
 			if index > 0 {
 				key, policy = "", sessionCreate
@@ -189,7 +190,7 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 				c.Request.Context(), pool, key, policy, model, responseID, generationMedia{aspectRatio: bridge.AspectRatio}, thinkingLevel, bridge,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildGeminiPrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(key)))
-				}, onEvent, hasVisibleOutput,
+				}, onEvent, projection,
 			)
 			c.Set("account_id", accountID)
 			if err == nil && index == 0 {
@@ -209,18 +210,18 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 			for index := range count {
 				projection := newStreamProjection(bridge, includeThoughts)
 				result, err := generate(index, func(event gemini.Event) error {
-					stream.release()
+					if !usageOnly(event) {
+						stream.release()
+					}
 					return projection.project(event, func(event gemini.Event) error {
 						return writer.delta(responseID, streamModel, index, event)
-					}, func(err error) error {
-						return writer.fail(http.StatusBadGateway, "INTERNAL", err)
 					})
-				}, projection.hasVisibleOutput)
+				}, projection)
 				if err != nil {
 					if stream.reject() {
 						writer.closed = true
 						writeGeminiError(c, upstreamStatus(err), geminiUpstreamStatus(err), err.Error())
-					} else if !projection.errorSent {
+					} else {
 						_ = writer.fail(upstreamStatus(err), geminiUpstreamStatus(err), streamFailure(c, err))
 					}
 					return
@@ -246,6 +247,7 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 			return
 		}
 
+		defer startNonstreamKeepalive(c)()
 		var response gin.H
 		for index := range count {
 			result, err := generate(index, nil, nil)
@@ -282,10 +284,10 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 // geminiCandidateCount 返回 generationConfig.candidateCount 要求的候选数，缺省或小于 1 时为 1
 func geminiCandidateCount(request GeminiGenerateContentRequest) int {
 	var config struct {
-		CandidateCount int `json:"candidateCount"`
+		CandidateCount protoInt `json:"candidateCount"`
 	}
 	_ = json.Unmarshal(request.GenerationConfig, &config)
-	return max(config.CandidateCount, 1)
+	return max(int(config.CandidateCount), 1)
 }
 
 // geminiUnsupportedMethod 返回与官方相同的方法不可用说明，并写明 Gemini Web 不提供的能力
@@ -342,7 +344,23 @@ func countGeminiTokens(c *gin.Context, pool *balancer.AccountPool, model string,
 	c.JSON(http.StatusOK, gin.H{"totalTokens": total, "promptTokensDetails": details})
 }
 
+// geminiToolNames 返回带 ID 的 functionCall 的调用 ID 到结果标签的映射
+func geminiToolNames(contents []GeminiContent) map[string]string {
+	names := map[string]string{}
+	for _, content := range contents {
+		var turn []toolCallRef
+		for _, part := range content.Parts {
+			if part.FunctionCall != nil && part.FunctionCall.ID != "" {
+				turn = append(turn, toolCallRef{ID: part.FunctionCall.ID, Name: part.FunctionCall.Name})
+			}
+		}
+		labelToolCalls(names, turn)
+	}
+	return names
+}
+
 func buildGeminiPrompt(c *gin.Context, client *gemini.Client, request GeminiGenerateContentRequest, continuation bool, bridge ToolBridge) (string, []gemini.FileData, error) {
+	toolNames := geminiToolNames(request.Contents)
 	contents := request.Contents
 	if continuation {
 		for index := len(contents) - 1; index >= 0; index-- {
@@ -352,36 +370,58 @@ func buildGeminiPrompt(c *gin.Context, client *gemini.Client, request GeminiGene
 			}
 		}
 	}
-	records := make([]map[string]interface{}, 0, len(contents)+1)
+	turns := make([]transcriptTurn, 0, len(contents)+1)
 	var files []gemini.FileData
 	if request.SystemInstruction != nil && !continuation {
-		text, attachments, err := decodeGeminiParts(c, client, request.SystemInstruction.Parts)
+		text, attachments, err := decodeGeminiParts(c, client, request.SystemInstruction.Parts, nil)
 		if err != nil {
 			return "", nil, err
 		}
-		records = append(records, map[string]interface{}{"role": "system", "content": text})
+		turns = append(turns, transcriptTurn{Role: "system", Text: text})
 		files = append(files, attachments...)
 	}
 	for _, content := range contents {
-		text, attachments, err := decodeGeminiParts(c, client, content.Parts)
+		text, attachments, err := decodeGeminiParts(c, client, content.Parts, toolNames)
 		if err != nil {
 			return "", nil, err
 		}
-		records = append(records, map[string]interface{}{"role": transcriptRole(content.Role), "content": text})
+		turns = append(turns, transcriptTurn{Role: transcriptRole(content.Role), Text: text})
 		files = append(files, attachments...)
-	}
-	transcript, err := renderTranscript(records)
-	if err != nil {
-		return "", nil, err
 	}
 	suffix, err := bridge.PromptSuffix()
 	if err != nil {
 		return "", nil, err
 	}
-	return transcript + suffix, files, nil
+	return renderTranscript(turns, suffix), files, nil
 }
 
-func decodeGeminiParts(c *gin.Context, client *gemini.Client, parts []GeminiPart) (string, []gemini.FileData, error) {
+// functionResponseText 按 Gemini 约定返回函数结果原文：output 与 error 字段分别是函数输出与错误详情，两者都没有时整个 response 是输出
+func functionResponseText(response map[string]interface{}) string {
+	output, hasOutput := response["output"]
+	failure, hasError := response["error"]
+	if !hasOutput && !hasError {
+		return jsonValueText(response)
+	}
+	var parts []string
+	if hasOutput {
+		parts = append(parts, jsonValueText(output))
+	}
+	if hasError {
+		parts = append(parts, "error: "+jsonValueText(failure))
+	}
+	return strings.Join(parts, "\n")
+}
+
+// jsonValueText 返回 JSON 值写入提示词的原文：字符串取原文，其余取 JSON
+func jsonValueText(value interface{}) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	data, _ := json.Marshal(value)
+	return string(data)
+}
+
+func decodeGeminiParts(c *gin.Context, client *gemini.Client, parts []GeminiPart, toolNames map[string]string) (string, []gemini.FileData, error) {
 	var builder strings.Builder
 	var files []gemini.FileData
 	for _, part := range parts {
@@ -390,20 +430,19 @@ func decodeGeminiParts(c *gin.Context, client *gemini.Client, parts []GeminiPart
 		}
 		if part.FunctionCall != nil {
 			arguments, _ := json.Marshal(part.FunctionCall.Args)
-			appendTranscriptObject(&builder, map[string]interface{}{"type": "tool_use", "id": part.FunctionCall.ID, "name": part.FunctionCall.Name, "arguments": json.RawMessage(arguments)})
+			writeCallBlock(&builder, part.FunctionCall.Name, arguments)
 		}
 		if part.FunctionResponse != nil {
-			response, _ := json.Marshal(part.FunctionResponse.Response)
-			result := map[string]interface{}{"type": "tool_result", "id": part.FunctionResponse.ID, "name": part.FunctionResponse.Name, "response": json.RawMessage(response)}
+			content := functionResponseText(part.FunctionResponse.Response)
 			if len(part.FunctionResponse.Parts) > 0 {
-				label, attachments, err := decodeGeminiParts(c, client, part.FunctionResponse.Parts)
+				label, attachments, err := decodeGeminiParts(c, client, part.FunctionResponse.Parts, nil)
 				if err != nil {
 					return "", nil, err
 				}
-				result["parts"] = label
+				content = strings.TrimSpace(content + "\n" + label)
 				files = append(files, attachments...)
 			}
-			appendTranscriptObject(&builder, result)
+			writeResultBlock(&builder, cmp.Or(toolNames[part.FunctionResponse.ID], part.FunctionResponse.Name), content)
 		}
 		if part.ExecutableCode != nil {
 			appendTranscriptObject(&builder, map[string]interface{}{
@@ -421,7 +460,7 @@ func decodeGeminiParts(c *gin.Context, client *gemini.Client, parts []GeminiPart
 				partType = "image"
 			}
 			raw, _ := json.Marshal([]gin.H{{"type": partType, "source": gin.H{"type": "base64", "media_type": part.InlineData.MimeType, "data": part.InlineData.Data}}})
-			label, attachments, err := decodeMessageContent(c.Request.Context(), raw, client)
+			label, attachments, err := decodeMessageContent(c.Request.Context(), raw, client, nil)
 			if err != nil {
 				return "", nil, err
 			}
@@ -537,7 +576,7 @@ func geminiToolBridge(request GeminiGenerateContentRequest) (ToolBridge, []strin
 		case mime == "application/json" || len(schema) > 0:
 			bridge.JSONSchema = schema
 			if len(bridge.JSONSchema) == 0 {
-				bridge.JSONSchema = json.RawMessage(`{"type":"object"}`)
+				bridge.JSONSchema = json.RawMessage(`{}`)
 			}
 		}
 	}
@@ -549,13 +588,16 @@ func geminiToolBridge(request GeminiGenerateContentRequest) (ToolBridge, []strin
 		for _, group := range groups {
 			for field := range group {
 				switch field {
-				case "functionDeclarations", "googleSearch", "googleSearchRetrieval", "codeExecution":
+				case "functionDeclarations", "googleSearch", "googleSearchRetrieval", "codeExecution", "urlContext":
 				default:
 					return bridge, nil, fmt.Errorf("不支持的 Gemini 工具组 %q", field)
 				}
 			}
 			if len(group["googleSearch"]) > 0 || len(group["googleSearchRetrieval"]) > 0 {
 				bridge.WebSearch = true
+			}
+			if len(group["urlContext"]) > 0 {
+				bridge.URLContext = true
 			}
 			if len(group["codeExecution"]) > 0 {
 				bridge.CodeExecution = true
@@ -610,7 +652,7 @@ func geminiToolBridge(request GeminiGenerateContentRequest) (ToolBridge, []strin
 		case "ANY":
 			bridge.Choice = "required"
 			if len(allowedNames) == 1 {
-				bridge.Choice = allowedNames[0]
+				bridge.Choice = explicitChoicePrefix + allowedNames[0]
 			}
 		case "", "AUTO", "VALIDATED", "MODE_UNSPECIFIED":
 		default:

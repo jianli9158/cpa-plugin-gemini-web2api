@@ -355,6 +355,7 @@ func RunIncognitoLogin(ctx context.Context, req IsolatedLoginRequest) (IsolatedL
 	var storagePath string
 	if strings.TrimSpace(req.OutputDir) != "" {
 		storagePath = filepath.Join(req.OutputDir, accountID, storageFileName)
+		state.Metadata = auth.Inherit(storagePath, state.Metadata)
 		file, err := auth.New(storagePath, state)
 		if err != nil {
 			return IsolatedLoginResult{}, err
@@ -619,23 +620,12 @@ func verifyGeminiSession(ctx context.Context, cookies []auth.StateCookie, proxyA
 
 	verifyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	geminiCookies := make([]gemini.Cookie, 0, len(cookies))
-	for _, c := range cookies {
-		geminiCookies = append(geminiCookies, gemini.Cookie{
-			Name:     c.Name,
-			Value:    c.Value,
-			Domain:   c.Domain,
-			Path:     c.Path,
-			Expires:  int64(c.Expires),
-			HTTPOnly: c.HTTPOnly,
-			Secure:   c.Secure,
-			SameSite: c.SameSite,
-		})
-	}
+	geminiCookies := auth.GeminiCookies(cookies)
 	client, err := gemini.NewClient(gemini.AccountSource{ID: "verify", Cookies: geminiCookies}, proxyAddr, false)
 	if err != nil {
 		return "", false
 	}
+	defer client.CloseIdleConnections()
 	if err := client.Init(verifyCtx); err != nil {
 		return "", false
 	}

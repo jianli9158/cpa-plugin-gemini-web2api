@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 type ClaudeRequest struct {
@@ -27,6 +28,7 @@ type ClaudeRequest struct {
 type ThinkingConfig struct {
 	Type         string `json:"type"`
 	BudgetTokens *int   `json:"budget_tokens,omitempty"`
+	Display      string `json:"display,omitempty"`
 }
 
 // OutputConfig 表示 Claude 输出强度与结构化输出配置
@@ -77,13 +79,17 @@ type Tool struct {
 	Name        *string         `json:"name,omitempty"`
 	Description *string         `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+	// DisplayWidthPx、DisplayHeightPx 与 EnableZoom 是 computer 工具的屏幕尺寸与 zoom 动作开关
+	DisplayWidthPx  int  `json:"display_width_px,omitempty"`
+	DisplayHeightPx int  `json:"display_height_px,omitempty"`
+	EnableZoom      bool `json:"enable_zoom,omitempty"`
 }
 
 func (t Tool) IsWebSearch() bool {
-	if t.Type != nil && (*t.Type == "web_search" || *t.Type == "web_search_20250305") {
+	if t.Type != nil && strings.HasPrefix(*t.Type, "web_search") {
 		return true
 	}
-	if t.Name != nil && (*t.Name == "web_search" || *t.Name == "google_search") {
+	if t.Name != nil && (*t.Name == "web_search" || *t.Name == "google_search") && len(t.InputSchema) == 0 {
 		return true
 	}
 	return false
@@ -96,7 +102,7 @@ type ClaudeResponse struct {
 	Model          string         `json:"model"`
 	Content        []ContentBlock `json:"content"`
 	StopReason     string         `json:"stop_reason"`
-	StopSequence   *string        `json:"stop_sequence,omitempty"`
+	StopSequence   *string        `json:"stop_sequence"`
 	Usage          *Usage         `json:"usage,omitempty"`
 	ConversationID string         `json:"conversation_id,omitempty"`
 }

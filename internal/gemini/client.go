@@ -20,6 +20,7 @@ import (
 
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
@@ -51,6 +52,8 @@ type Client struct {
 	timer       pageTimer
 	contextSize atomic.Int64
 	requestSlot *semaphore.Weighted
+	// yieldSlot 限制同一账号同时让出请求槽的请求数
+	yieldSlot *semaphore.Weighted
 	// concurrency 是请求槽数量
 	concurrency int
 	busy        atomic.Int32
@@ -112,6 +115,14 @@ func (c *Client) TryAcquireRequest() (func(), bool) {
 	return c.releaseRequest, true
 }
 
+// YieldRequest 取得一个让出请求槽的名额，同一账号同时只有一个请求能让出，成功时返回归还名额的函数
+func (c *Client) YieldRequest() (func(), bool) {
+	if !c.yieldSlot.TryAcquire(1) {
+		return nil, false
+	}
+	return func() { c.yieldSlot.Release(1) }, true
+}
+
 // SetReleaseHook 设置请求槽释放后调用的函数
 func (c *Client) SetReleaseHook(hook func()) {
 	c.releaseHook.Store(&hook)
@@ -158,6 +169,7 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 		clientID:    clientID,
 		saveHistory: saveHistory,
 		requestSlot: semaphore.NewWeighted(int64(concurrency)),
+		yieldSlot:   semaphore.NewWeighted(1),
 		concurrency: concurrency,
 		refreshSlot: semaphore.NewWeighted(1),
 		cookies:     make(map[string]Cookie, len(source.Cookies)),
@@ -364,25 +376,43 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 		}
 	}
 	uploadStarted := time.Now()
+	uploadFailed := func(err error) error {
+		if allowRefresh && renewable(err) && c.refresh != nil {
+			return c.restream(ctx, version, request, emit)
+		}
+		return err
+	}
 	if uploads > 0 {
 		trace.SetStage("接受上传条款")
 		if err := c.acceptUploadTerms(ctx, bootstrap, model.Mode, request.ThinkingLevel); err != nil {
-			return err
+			return uploadFailed(err)
 		}
 		trace.SetStage("上传附件")
 	}
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(uploadLimit)
 	for index := range request.Files {
 		file := &request.Files[index]
-		if file.URL == "" {
-			if *file, err = c.uploadFile(ctx, bootstrap, *file); err != nil {
-				return err
+		group.Go(func() error {
+			if file.URL == "" {
+				uploaded, err := c.uploadFile(groupCtx, bootstrap, *file)
+				if err != nil {
+					return err
+				}
+				*file = uploaded
 			}
-		}
-		if file.FileID == "" {
-			if file.FileID, err = c.processFile(ctx, bootstrap, model, request.ThinkingLevel, *file); err != nil {
-				return err
+			if file.FileID == "" {
+				fileID, err := c.processFile(groupCtx, bootstrap, model, request.ThinkingLevel, *file)
+				if err != nil {
+					return err
+				}
+				file.FileID = fileID
 			}
-		}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return uploadFailed(err)
 	}
 	if uploads > 0 {
 		trace.Stage("附件上传完成", "数量", uploads, "大小", formatBytes(uploadBytes), "耗时", time.Since(uploadStarted))
@@ -492,7 +522,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	if err == nil && decoder.background && !request.researchConfirm {
 		err = c.awaitTurn(ctx, decodeState, nil, model, request.ThinkingLevel, nil, request.researchPlan, guard.Emit)
 	}
-	if snapshot := decodeState.Snapshot(); streamInterrupted(err) && !temporaryChat && !request.researchConfirm && snapshot.CID != "" && snapshot.RID != next.RID {
+	if snapshot := decodeState.Snapshot(); streamInterrupted(err) && !temporaryChat && !c.guest && !request.researchConfirm && snapshot.CID != "" && snapshot.RID != next.RID {
 		trace.Stage("生成流中断，读取会话取回回答", "原因", err)
 		err = c.awaitTurn(ctx, decodeState, decoder, model, request.ThinkingLevel, nil, request.researchPlan, guard.Emit)
 	}
@@ -1071,6 +1101,12 @@ func streamInterrupted(err error) bool {
 
 // ErrTransport 表示连接、TLS 或代理等网络层失败，与账号状态无关
 var ErrTransport = errors.New("gemini web transport failure")
+
+// TransientError 判断错误是否为与账号状态无关的一次性上游失败：网络层失败、生成流在结束帧前中断或停顿，以及没有具体原因的 5xx（上游 HTTP 5xx、5xx 错误记录、没有完成的候选）
+func TransientError(err error) bool {
+	var protocolErr *ProtocolError
+	return streamInterrupted(err) || errors.Is(err, errStreamIdle) || errors.As(err, &protocolErr) && protocolErr.Code >= 500 && protocolErr.Code < 600 && protocolErr.Cause == nil
+}
 
 func transportProtocolError(operation string, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

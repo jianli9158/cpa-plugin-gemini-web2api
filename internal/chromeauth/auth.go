@@ -3,7 +3,6 @@ package chromeauth
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"path/filepath"
@@ -23,19 +22,10 @@ const (
 
 var slugPattern = regexp.MustCompile(`[^a-z0-9]+`)
 
-// ImportResult 描述单个账号导入结果
-type ImportResult struct {
-	Profile     string `json:"profile"`
-	Email       string `json:"email"`
-	Imported    bool   `json:"imported"`
-	CookieCount int    `json:"cookieCount"`
-	Path        string `json:"path"`
-	CompletedAt string `json:"completedAt"`
-}
-
+// pendingImport 是通过验证后写入 path 的认证状态与验证请求使用的代理
 type pendingImport struct {
 	state        auth.StorageState
-	result       ImportResult
+	path         string
 	requestProxy string
 }
 
@@ -49,54 +39,49 @@ type CookieImportOptions struct {
 	AuthUser     int
 }
 
-// ImportCookies 从 Cookie 文本生成短期账号状态
-func ImportCookies(ctx context.Context, options CookieImportOptions) (ImportResult, int, error) {
-	proxyURL, requestProxy, err := importProxies(options.Proxy, options.RequestProxy)
-	if err != nil {
-		return ImportResult{}, 0, err
-	}
+// ImportCookies 从 Cookie 文本生成账号状态，返回状态文件路径与模型数
+func ImportCookies(ctx context.Context, options CookieImportOptions) (string, int, error) {
 	id := AccountID(options.ID)
 	if id == "" {
-		return ImportResult{}, 0, fmt.Errorf("id 必须包含英文字母或数字")
+		return "", 0, fmt.Errorf("id 必须包含英文字母或数字")
 	}
 	if options.AuthUser < 0 {
-		return ImportResult{}, 0, fmt.Errorf("authuser 不能为负数")
+		return "", 0, fmt.Errorf("authuser 不能为负数")
 	}
 	cookies, err := parseCookies(options.Cookies)
 	if err != nil {
-		return ImportResult{}, 0, err
+		return "", 0, err
 	}
 	path := filepath.Join(options.Output, id, storageFileName)
-	state := auth.StorageState{
-		Cookies: cookies,
-		Origins: []json.RawMessage{},
-		Metadata: auth.Metadata{
-			ID:       id,
-			Proxy:    proxyURL,
-			Source:   auth.ImportSource{Browser: "cookie-header"},
-			Language: defaultImportLanguage,
-			AuthUser: options.AuthUser,
-		},
-	}
-	absPath, err := filepath.Abs(path)
+	metadata, requestProxy, err := importIdentity(path, auth.Metadata{
+		ID:       id,
+		Proxy:    options.Proxy,
+		Source:   auth.ImportSource{Browser: "cookie-header"},
+		Language: defaultImportLanguage,
+		AuthUser: options.AuthUser,
+	}, options.RequestProxy)
 	if err != nil {
-		return ImportResult{}, 0, fmt.Errorf("解析认证状态路径: %w", err)
+		return "", 0, err
 	}
 	pending := pendingImport{
-		state: state,
-		result: ImportResult{
-			Profile:     "cookie-header",
-			Imported:    true,
-			CookieCount: len(cookies),
-			Path:        absPath,
-		},
+		state:        auth.StorageState{Cookies: cookies, Metadata: metadata},
+		path:         path,
 		requestProxy: requestProxy,
 	}
-	results, modelCount, err := validateAndWriteImports(ctx, []pendingImport{pending})
+	paths, modelCount, err := validateAndWriteImports(ctx, []pendingImport{pending})
 	if err != nil {
-		return ImportResult{}, 0, err
+		return "", 0, err
 	}
-	return results[0], modelCount, nil
+	return paths[0], modelCount, nil
+}
+
+// importIdentity 返回写入 path 的账号身份与导入请求使用的代理：账号已导入过时沿用它的停用标记与未重新填写的固定代理
+func importIdentity(path string, metadata auth.Metadata, fallback string) (auth.Metadata, string, error) {
+	metadata.Proxy = strings.TrimSpace(metadata.Proxy)
+	metadata = auth.Inherit(path, metadata)
+	fixed, requestProxy, err := importProxies(metadata.Proxy, fallback)
+	metadata.Proxy = fixed
+	return metadata, requestProxy, err
 }
 
 func importProxies(proxy string, fallback string) (string, string, error) {
@@ -129,19 +114,20 @@ func ValidateProxy(value string) (string, error) {
 	}
 }
 
-func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]ImportResult, int, error) {
+// validateAndWriteImports 以首页、模型目录与用量请求验证每个账号，全部通过后写入认证状态，返回各状态文件的路径与模型数
+func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]string, int, error) {
 	models := make(map[string]struct{})
 	for index := range pending {
 		item := &pending[index]
 		source := gemini.AccountSource{
 			ID:       item.state.Metadata.ID,
-			Cookies:  stateCookiesToGemini(item.state.Cookies),
+			Cookies:  auth.GeminiCookies(item.state.Cookies),
 			Language: item.state.Metadata.Language,
 			AuthUser: item.state.Metadata.AuthUser,
-		}
-		source.Save = func(cookies []gemini.Cookie) error {
-			item.state.Cookies = geminiCookiesToState(cookies)
-			return nil
+			Save: func(cookies []gemini.Cookie) error {
+				item.state.Cookies = auth.StateCookies(cookies)
+				return nil
+			},
 		}
 		client, err := gemini.NewClient(source, item.requestProxy, false)
 		if err != nil {
@@ -161,96 +147,21 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]Im
 			models[model.ID] = struct{}{}
 		}
 	}
-	results := make([]ImportResult, len(pending))
-	completedAt := time.Now().UTC().Format(time.RFC3339Nano)
-	for index := range pending {
-		file, err := auth.New(pending[index].result.Path, pending[index].state)
+	paths := make([]string, len(pending))
+	for index, item := range pending {
+		file, err := auth.New(item.path, item.state)
 		if err != nil {
 			return nil, 0, err
 		}
 		if err := file.Write(); err != nil {
 			return nil, 0, err
 		}
-		pending[index].result.CompletedAt = completedAt
-		results[index] = pending[index].result
+		paths[index] = file.Path()
 	}
-	return results, len(models), nil
+	return paths, len(models), nil
 }
 
 // AccountID 返回邮箱对应的账号 ID
 func AccountID(email string) string {
 	return strings.Trim(slugPattern.ReplaceAllString(strings.ToLower(strings.TrimSpace(email)), "-"), "-")
-}
-
-func stateCookiesToGemini(cookies []auth.StateCookie) []gemini.Cookie {
-	result := make([]gemini.Cookie, 0, len(cookies))
-	for _, cookie := range cookies {
-		result = append(result, gemini.Cookie{
-			Name:     cookie.Name,
-			Value:    cookie.Value,
-			Domain:   cookie.Domain,
-			Path:     cookie.Path,
-			Expires:  int64(cookie.Expires),
-			HTTPOnly: cookie.HTTPOnly,
-			Secure:   cookie.Secure,
-			SameSite: cookie.SameSite,
-		})
-	}
-	return result
-}
-
-func geminiCookiesToState(cookies []gemini.Cookie) []auth.StateCookie {
-	result := make([]auth.StateCookie, 0, len(cookies))
-	for _, cookie := range cookies {
-		result = append(result, auth.StateCookie{
-			Name:     cookie.Name,
-			Value:    cookie.Value,
-			Domain:   cookie.Domain,
-			Path:     cookie.Path,
-			Expires:  float64(cookie.Expires),
-			HTTPOnly: cookie.HTTPOnly,
-			Secure:   cookie.Secure,
-			SameSite: cookie.SameSite,
-		})
-	}
-	return result
-}
-
-func parseCookieHeader(header string) ([]auth.StateCookie, error) {
-	header = strings.TrimSpace(header)
-	if len(header) >= len("Cookie:") && strings.EqualFold(header[:len("Cookie:")], "Cookie:") {
-		header = strings.TrimSpace(header[len("Cookie:"):])
-	}
-	if header == "" || strings.ContainsAny(header, "\r\n") {
-		return nil, fmt.Errorf("cookie 必须是一行 Cookie Header")
-	}
-	cookies := make([]auth.StateCookie, 0)
-	names := make(map[string]struct{})
-	for _, item := range strings.Split(header, ";") {
-		parts := strings.SplitN(strings.TrimSpace(item), "=", 2)
-		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
-			return nil, fmt.Errorf("Cookie Header 项 %q 格式无效", strings.TrimSpace(item))
-		}
-		name := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-		if value == "" {
-			return nil, fmt.Errorf("Cookie %s 的值为空", name)
-		}
-		if _, exists := names[name]; exists {
-			continue
-		}
-		names[name] = struct{}{}
-		domain := ".google.com"
-		if strings.HasPrefix(name, "__Host-") {
-			domain = "gemini.google.com"
-		}
-		cookies = append(cookies, auth.StateCookie{
-			Name:   name,
-			Value:  value,
-			Domain: domain,
-			Path:   "/",
-			Secure: true,
-		})
-	}
-	return cookies, nil
 }

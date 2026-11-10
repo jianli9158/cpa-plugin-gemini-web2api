@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -82,7 +83,9 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildClaudePrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(sessionKey)))
 				}, func(event gemini.Event) error {
-					stream.release()
+					if !usageOnly(event) {
+						stream.release()
+					}
 					if event.Kind == gemini.EventMetadata && event.Usage != nil {
 						return processor.ProcessEvent(event)
 					}
@@ -98,15 +101,15 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 							thinkingOpen = true
 						}
 						return processor.ProcessEvent(event)
-					}, processor.EmitError)
+					})
 				},
-				projection.hasVisibleOutput,
+				projection,
 			)
 			c.Set("account_id", accountID)
 			if err != nil {
 				if stream.reject() {
 					writeClaudeError(c, upstreamStatus(err), claudeUpstreamType(err), err.Error())
-				} else if !projection.errorSent {
+				} else {
 					_ = processor.EmitErrorType(claudeUpstreamType(err), streamFailure(c, err))
 				}
 				return
@@ -188,6 +191,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 
+		defer startNonstreamKeepalive(c)()
 		result, accountID, err := runGeneration(
 			c.Request.Context(), pool, sessionKey, previousResponsePolicy(request.PreviousResponseID), request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
@@ -238,8 +242,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			blocks = append(blocks, claude.ContentBlock{Type: "text", Text: content})
 		}
 		for _, call := range calls {
-			var input map[string]interface{}
-			_ = json.Unmarshal(call.Arguments, &input)
+			input := claudeToolInput(call.Arguments)
 			blocks = append(blocks, claude.ContentBlock{Type: "tool_use", ID: call.ID, Name: call.Name, Input: &input})
 		}
 		stopReason := "end_turn"
@@ -312,41 +315,80 @@ func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.Cla
 			}
 		}
 	}
-	records := make([]map[string]interface{}, 0, len(messages)+1)
+	turns := make([]transcriptTurn, 0, len(messages)+1)
 	var files []gemini.FileData
 	if !continuation {
 		if system, err := claude.ParseSystemPrompt(request.System); err != nil {
 			return "", nil, err
 		} else if system != "" {
-			records = append(records, map[string]interface{}{"role": "system", "content": system})
+			turns = append(turns, transcriptTurn{Role: "system", Text: system})
 		}
 	}
+	toolNames := claudeToolNames(request.Messages)
 	for _, message := range messages {
-		content, attachments, err := decodeMessageContent(c.Request.Context(), message.Content, client)
+		content, attachments, err := decodeMessageContent(c.Request.Context(), message.Content, client, toolNames)
 		if err != nil {
 			return "", nil, err
 		}
-		records = append(records, map[string]interface{}{"role": transcriptRole(message.Role), "content": content})
+		turns = append(turns, transcriptTurn{Role: transcriptRole(message.Role), Text: content})
 		files = append(files, attachments...)
-	}
-	transcript, err := renderTranscript(records)
-	if err != nil {
-		return "", nil, err
 	}
 	suffix, err := bridge.PromptSuffix()
 	if err != nil {
 		return "", nil, err
 	}
-	return transcript + suffix, files, nil
+	return renderTranscript(turns, suffix), files, nil
+}
+
+// claudeToolNames 返回消息中 tool_use 的调用 ID 到结果标签的映射
+func claudeToolNames(messages []claude.Message) map[string]string {
+	names := map[string]string{}
+	for _, message := range messages {
+		var blocks []struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(message.Content, &blocks)
+		var turn []toolCallRef
+		for _, block := range blocks {
+			if block.Type == "tool_use" {
+				turn = append(turn, toolCallRef{ID: block.ID, Name: block.Name})
+			}
+		}
+		labelToolCalls(names, turn)
+	}
+	return names
+}
+
+// claudeToolInput 解码工具调用参数，数字保持原文
+func claudeToolInput(arguments json.RawMessage) map[string]interface{} {
+	decoder := json.NewDecoder(bytes.NewReader(arguments))
+	decoder.UseNumber()
+	var input map[string]interface{}
+	_ = decoder.Decode(&input)
+	return input
 }
 
 func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
-	bridge := ToolBridge{Choice: claudeToolChoice(request.ToolChoice), Stop: request.StopSequences}
+	var parallel struct {
+		Disable bool `json:"disable_parallel_tool_use"`
+	}
+	_ = json.Unmarshal(request.ToolChoice, &parallel)
+	bridge := ToolBridge{Choice: claudeToolChoice(request.ToolChoice), Stop: request.StopSequences, SingleCall: parallel.Disable}
 	webTool := false
 	for _, tool := range request.Tools {
 		if tool.IsWebSearch() {
 			bridge.WebSearch = true
 			webTool = true
+			continue
+		}
+		kind := ""
+		if tool.Type != nil {
+			kind = strings.ToLower(*tool.Type)
+		}
+		if anthropicServerTool(kind) {
+			bridge.URLContext = bridge.URLContext || strings.HasPrefix(kind, "web_fetch_")
 			continue
 		}
 		if tool.Name == nil || *tool.Name == "" {
@@ -360,6 +402,9 @@ func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
 		if tool.Description != nil {
 			description = *tool.Description
 		}
+		if text, schema := anthropicDefinedTool(tool, kind); schema != nil {
+			description, parameters = text, schema
+		}
 		bridge.Definitions = append(bridge.Definitions, ToolDefinition{Name: *tool.Name, Description: description, Parameters: parameters})
 	}
 	format := request.OutputFormat
@@ -372,7 +417,10 @@ func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
 		}
 		bridge.JSONSchema = format.Schema
 	}
-	choice := strings.ToLower(strings.TrimSpace(bridge.Choice))
+	if bridge.hasTool(bridge.explicitTool()) {
+		return bridge, nil
+	}
+	choice := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(bridge.Choice), explicitChoicePrefix))
 	switch choice {
 	case "web_search", "web_search_20250305", "google_search":
 		if !webTool {
@@ -381,14 +429,12 @@ func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
 		bridge.RequireWebSearch = true
 		bridge.Choice = "auto"
 	case "any", "required":
-		if webTool && len(request.Tools) == 1 {
+		if webTool && len(bridge.Definitions) == 0 {
 			bridge.RequireWebSearch = true
 			bridge.Choice = "auto"
-		} else if webTool {
-			return ToolBridge{}, fmt.Errorf("web_search 与其他工具组合时不支持 tool_choice=%s", choice)
 		}
 	}
-	return bridge, nil
+	return bridge, bridge.checkExplicitTool()
 }
 
 func claudeToolChoice(raw json.RawMessage) string {
@@ -398,7 +444,7 @@ func claudeToolChoice(raw json.RawMessage) string {
 	}
 	if json.Unmarshal(raw, &choice) == nil {
 		if choice.Name != "" {
-			return choice.Name
+			return explicitChoicePrefix + choice.Name
 		}
 		if choice.Type != "" {
 			return choice.Type

@@ -140,7 +140,7 @@ func (p *Plugin) handleSchedulerPick(raw []byte) (any, error) {
 	}
 
 	// Check if all accounts for this model are cooling down
-	if retryAt := rt.Pool.RetryAfter(cleanModel); !retryAt.IsZero() && time.Until(retryAt) > time.Minute {
+	if retryAt := rt.Pool.RetryAfter(p.ctx, cleanModel); !retryAt.IsZero() && time.Until(retryAt) > time.Minute {
 		return pluginapi.SchedulerPickResponse{
 			Handled:      true,
 			Reject:       true,

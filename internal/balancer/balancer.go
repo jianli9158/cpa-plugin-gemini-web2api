@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
-	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/proxypool"
 )
 type pinnedAccountContextKey struct{}
 
@@ -70,6 +70,8 @@ type AccountInfo struct {
 type cooldown struct {
 	until  time.Time
 	reason string
+	// cause 是触发冷却的上游错误
+	cause string
 }
 
 type accountEntry struct {
@@ -102,6 +104,7 @@ type AccountStatus struct {
 	Profile          string            `json:"profile,omitempty"`
 	Proxy            string            `json:"proxy,omitempty"`
 	ProxySource      string            `json:"proxy_source,omitempty"`
+	FixedProxy       string            `json:"fixed_proxy,omitempty"`
 	Tier             string            `json:"tier,omitempty"`
 	ContextWindow    int               `json:"context_window,omitempty"`
 	Models           []string          `json:"models"`
@@ -183,6 +186,8 @@ type AccountPool struct {
 	saveCooldowns func([]Cooldown)
 	// persistMu 串行化从取冷却快照到保存完成的过程
 	persistMu sync.Mutex
+	// apiKeyAccounts 为各 API key 可用的账号 ID，未列出的 key 可用全部账号
+	apiKeyAccounts map[string][]string
 }
 
 // Cooldown 是一个账号或其某个模型的冷却，Model 为空表示整个账号
@@ -442,6 +447,7 @@ func (p *AccountPool) Client(accountID string) *gemini.Client {
 
 // AcquireForModel 选择可调度该模型的账号并占用一个请求槽，返回客户端、账号与释放函数；同一排队键的请求按到达顺序排队，队首在任一账号空出、就绪或状态变化后重新选择，没有可调度账号时客户端为空
 func (p *AccountPool) AcquireForModel(ctx context.Context, sessionKey string, modelID string, excludedAccountIDs map[string]struct{}) (*gemini.Client, string, func(), error) {
+	excludedAccountIDs = p.keyExcluded(ctx, excludedAccountIDs)
 	pinnedID := PinnedAccountIDFromContext(ctx)
 	key, wake := p.joinQueue(pinnedID, sessionKey, modelID, excludedAccountIDs)
 	defer p.leaveQueue(key, wake)
@@ -552,7 +558,7 @@ func (p *AccountPool) notifyLocked() {
 	}
 }
 
-// NextForModelExcluding 为无会话重试选择未排除的同能力账号
+// NextForModelExcluding 选择会话绑定的账号或未排除的同能力账号，会话绑定的账号被排除或不可调度时客户端为空并返回该账号
 func (p *AccountPool) NextForModelExcluding(sessionKey string, modelID string, excludedAccountIDs map[string]struct{}) (*gemini.Client, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -563,7 +569,8 @@ func (p *AccountPool) NextForModelExcluding(sessionKey string, modelID string, e
 	if sessionKey != "" {
 		if binding, ok := p.sessions[sessionKey]; ok && now.Before(binding.ExpiresAt) {
 			entry := p.entry(binding.AccountID)
-			if entry != nil && entry.schedulable(now, modelID) {
+			_, excluded := excludedAccountIDs[binding.AccountID]
+			if entry != nil && !excluded && entry.schedulable(now, modelID) {
 				entry.LastUsed = now
 				p.sessions[sessionKey] = sessionBinding{AccountID: entry.AccountID, ExpiresAt: now.Add(p.sessionTTL)}
 				return entry.Client, entry.AccountID
@@ -597,18 +604,22 @@ func (p *AccountPool) SessionIdle(sessionKey string, modelID string) bool {
 	return entry != nil && entry.schedulable(now, modelID) && !entry.Client.Busy()
 }
 
-// RetryAfter 返回目标模型最早结束冷却的时间，没有冷却中的账号时为零值
-func (p *AccountPool) RetryAfter(modelID string) time.Time {
+// RetryAfter 返回请求 API key 可用账号中目标模型最早结束冷却的时间，有未冷却的登录账号或没有冷却中的账号时为零值
+func (p *AccountPool) RetryAfter(ctx context.Context, modelID string) time.Time {
+	excluded := p.keyExcluded(ctx, nil)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
 	var earliest time.Time
 	for _, entry := range p.entries {
-		if entry.Client == nil || entry.State != StateReady || !entry.supportsModel(modelID) {
+		if _, skip := excluded[entry.AccountID]; skip || entry.Client == nil || entry.State != StateReady || !entry.supportsModel(modelID) {
 			continue
 		}
 		until := entry.blockedUntil(now, modelID)
 		if until.IsZero() {
+			if entry.guest() {
+				continue
+			}
 			return time.Time{}
 		}
 		if earliest.IsZero() || until.Before(earliest) {
@@ -662,6 +673,10 @@ func (p *AccountPool) ReportFailure(accountID string, modelID string, err error)
 		p.reportTransport(err)
 		return
 	}
+	if gemini.TransientError(err) {
+		logging.Warn(accountID, "上游临时失败，账号不冷却", "原因", err)
+		return
+	}
 	entry.ConsecutiveFails++
 	if gemini.IsAuthenticationError(err) {
 		entry.State = StateAuthRequired
@@ -670,10 +685,13 @@ func (p *AccountPool) ReportFailure(accountID string, modelID string, err error)
 	}
 	modelScope, reason := failureScope(err)
 	until := now.Add(p.cooldown)
+	if reason == "rate_limited" {
+		until = now.Add(rateLimitBackoff(min(p.cooldown, rateLimitCooldown), entry.ConsecutiveFails))
+	}
 	if reset := usageReset(entry.Client, err); !reset.IsZero() {
 		until = reset
 	}
-	value := cooldown{until: until, reason: reason}
+	value := cooldown{until: until, reason: reason, cause: entry.LastError}
 	cooled = true
 	if modelScope && modelID != "" {
 		entry.ModelCooldowns[modelID] = value
@@ -684,6 +702,17 @@ func (p *AccountPool) ReportFailure(accountID string, modelID string, err error)
 	logging.Warn(accountID, "账号冷却", "至", until, "原因", reason)
 }
 
+// rateLimitCooldown 是上游频率限制的首次冷却时长
+const rateLimitCooldown = time.Minute
+
+// rateLimitMaxCooldown 是连续频率限制的冷却时长上限
+const rateLimitMaxCooldown = 10 * time.Minute
+
+// rateLimitBackoff 返回账号连续第 fails 次失败时的冷却时长，从 base 起逐次翻倍
+func rateLimitBackoff(base time.Duration, fails int) time.Duration {
+	return min(base<<min(fails-1, 4), rateLimitMaxCooldown)
+}
+
 // failureScope 返回错误是否只影响当前模型与冷却原因 code
 func failureScope(err error) (bool, string) {
 	var protocolErr *gemini.ProtocolError
@@ -692,7 +721,7 @@ func failureScope(err error) (bool, string) {
 		case 1037:
 			return true, "usage_limit"
 		case 1095:
-			return true, "rate_limited"
+			return false, "rate_limited"
 		case 1060:
 			return false, "ip_restricted"
 		}
@@ -814,14 +843,18 @@ type ModelAvailability struct {
 	Pending []string
 }
 
-// ModelAvailability 按全部账号的模型目录返回目标模型的调度情况
-func (p *AccountPool) ModelAvailability(modelID string) ModelAvailability {
+// ModelAvailability 按请求 API key 可用账号的模型目录返回目标模型的调度情况
+func (p *AccountPool) ModelAvailability(ctx context.Context, modelID string) ModelAvailability {
+	excluded := p.keyExcluded(ctx, nil)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	now := time.Now()
 	var availability ModelAvailability
 	for _, entry := range p.entries {
+		if _, skip := excluded[entry.AccountID]; skip {
+			continue
+		}
 		if entry.Client == nil || entry.State != StateReady && len(entry.Client.Models()) == 0 {
 			if entry.State != StateDisabled {
 				availability.Pending = append(availability.Pending, entry.unavailableReason(now, modelID))
@@ -845,8 +878,11 @@ func (p *AccountPool) ModelAvailability(modelID string) ModelAvailability {
 	return availability
 }
 
-// AccountReason 返回账号不能调度该模型的原因：冷却截止时间或账号状态
-func (p *AccountPool) AccountReason(accountID string, modelID string) string {
+// AccountReason 返回账号不能调度该模型的原因：不在请求 API key 的绑定账号中、冷却截止时间或账号状态
+func (p *AccountPool) AccountReason(ctx context.Context, accountID string, modelID string) string {
+	if _, outside := p.keyExcluded(ctx, nil)[accountID]; outside {
+		return accountID + " 不在当前 API key 的绑定账号中"
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if entry := p.entry(accountID); entry != nil {
@@ -858,11 +894,24 @@ func (p *AccountPool) AccountReason(accountID string, modelID string) string {
 // unavailableReason 返回账号不能调度该模型的原因，调用方持有 p.mu
 func (e *accountEntry) unavailableReason(now time.Time, modelID string) string {
 	if until := e.blockedUntil(now, modelID); e.State == StateReady && !until.IsZero() {
-		return fmt.Sprintf("%s 冷却至 %s", e.AccountID, until.Local().Format(time.TimeOnly))
+		value := e.Cooldown
+		if model, ok := e.ModelCooldowns[modelID]; ok && !model.until.Before(value.until) {
+			value = model
+		}
+		reason := fmt.Sprintf("%s 冷却至 %s（%s", e.AccountID, until.Local().Format(time.TimeOnly), cooldownNames[value.reason])
+		if value.cause != "" {
+			reason += "：" + value.cause
+		}
+		return reason + "）"
 	}
 	return e.AccountID + " " + string(e.State)
 }
 
+// cooldownNames 是冷却原因 code 的说明
+var cooldownNames = map[string]string{
+	"usage_limit": "模型用量已达上限", "rate_limited": "请求频率受限", "ip_restricted": "出口 IP 受限",
+	"captcha": "人机验证拦截", "model_mismatch": "模型被降级", "upstream_error": "上游错误",
+}
 // Changed 返回账号状态下一次变化或请求槽释放时关闭的通道
 func (p *AccountPool) Changed() <-chan struct{} {
 	p.mu.Lock()
@@ -949,8 +998,14 @@ func (p *AccountPool) Usage(ctx context.Context, refresh bool) PoolUsageStatus {
 func (e *accountEntry) status(now time.Time) AccountStatus {
 	status := AccountStatus{
 		AccountID: e.AccountID, State: e.State, Enabled: e.State != StateDisabled, Source: e.Info.Source, Profile: e.Info.Profile,
-		Proxy: maskProxy(e.Info.Proxy), ProxySource: e.Info.ProxySource, Models: []string{}, ConsecutiveFails: e.ConsecutiveFails, LastError: e.LastError,
+		Proxy: proxypool.Redact(e.Info.Proxy), ProxySource: e.Info.ProxySource, Models: []string{}, ConsecutiveFails: e.ConsecutiveFails, LastError: e.LastError,
 		LastUsed: timePointer(e.LastUsed), ReadyAt: timePointer(e.ReadyAt), LastErrorAt: timePointer(e.LastErrorAt),
+	}
+	switch e.Info.ProxySource {
+	case "fixed":
+		status.FixedProxy = e.Info.Proxy
+	case "direct":
+		status.FixedProxy = proxypool.Direct
 	}
 	if e.State == StateReady && now.Before(e.Cooldown.until) {
 		status.State = StateCooldown
@@ -1002,18 +1057,6 @@ func timePointer(value time.Time) *time.Time {
 	return &copy
 }
 
-// maskProxy 隐藏代理 URL 中的密码
-func maskProxy(value string) string {
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.User == nil {
-		return value
-	}
-	if _, ok := parsed.User.Password(); ok {
-		parsed.User = url.UserPassword(parsed.User.Username(), "***")
-	}
-	return parsed.String()
-}
-
 func errorText(err error) string {
 	if err == nil {
 		return ""
@@ -1029,7 +1072,7 @@ func (p *AccountPool) nextAvailable(now time.Time, modelID string, excludedAccou
 	return p.nextFrom(now, modelID, excludedAccountIDs, true)
 }
 
-// nextFrom 在账号或访客会话中按上下文窗口与调度策略选择
+// nextFrom 在账号或访客会话中选择：先取请求槽空闲的账号，都不空闲时取全部账号，其中上下文窗口最大的按调度策略选择
 func (p *AccountPool) nextFrom(now time.Time, modelID string, excludedAccountIDs map[string]struct{}, guest bool) *accountEntry {
 	if len(p.entries) == 0 {
 		return nil
@@ -1039,25 +1082,24 @@ func (p *AccountPool) nextFrom(now time.Time, modelID string, excludedAccountIDs
 		_, excluded := excludedAccountIDs[entry.AccountID]
 		return !excluded && entry.guest() == guest && entry.schedulable(now, modelID)
 	}
-	maxContextWindow := -1
-	for _, entry := range p.entries {
-		if eligible(entry) && entry.Client.ContextWindow() > maxContextWindow {
-			maxContextWindow = entry.Client.ContextWindow()
-		}
-	}
-	if maxContextWindow < 0 {
-		return nil
-	}
-
 	start := p.index
 	if p.strategy == FillFirst {
 		start = 0
 	}
 	for _, idleOnly := range []bool{true, false} {
+		candidate := func(entry *accountEntry) bool {
+			return eligible(entry) && (!idleOnly || !entry.Client.Busy())
+		}
+		maxContextWindow := -1
+		for _, entry := range p.entries {
+			if candidate(entry) {
+				maxContextWindow = max(maxContextWindow, entry.Client.ContextWindow())
+			}
+		}
 		for offset := uint64(0); offset < uint64(len(p.entries)); offset++ {
 			idx := (start + offset) % uint64(len(p.entries))
 			entry := p.entries[idx]
-			if eligible(entry) && entry.Client.ContextWindow() == maxContextWindow && (!idleOnly || !entry.Client.Busy()) {
+			if candidate(entry) && entry.Client.ContextWindow() == maxContextWindow {
 				p.index = idx + 1
 				return entry
 			}

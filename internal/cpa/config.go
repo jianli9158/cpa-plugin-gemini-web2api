@@ -13,7 +13,7 @@ import (
 
 const (
 	PluginID      = "gemini-web2api"
-	PluginVersion = "1.0.1"
+	PluginVersion = "1.0.2"
 	ProviderID    = "gemini-web2api"
 )
 
@@ -29,6 +29,7 @@ type PluginConfig struct {
 	AccountCooldown       string            `json:"account_cooldown" yaml:"account_cooldown"`
 	SessionTTL            string            `json:"session_ttl" yaml:"session_ttl"`
 	InitTimeout           string            `json:"init_timeout" yaml:"init_timeout"`
+	FirstEventHedge       string            `json:"first_event_hedge" yaml:"first_event_hedge"`
 	PerAccountConcurrency *int              `json:"per_account_concurrency" yaml:"per_account_concurrency"`
 	RoutingStrategy       string            `json:"routing_strategy" yaml:"routing_strategy"`
 	RequestBodyLog        *bool             `json:"request_body_log" yaml:"request_body_log"`
@@ -92,6 +93,9 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 			}
 			if pcfg.InitTimeout == "" {
 				pcfg.InitTimeout = opt.InitTimeout
+			}
+			if pcfg.FirstEventHedge == "" {
+				pcfg.FirstEventHedge = opt.FirstEventHedge
 			}
 			if pcfg.PerAccountConcurrency == nil {
 				pcfg.PerAccountConcurrency = opt.PerAccountConcurrency
@@ -180,6 +184,12 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 		}
 	}
 
+	firstEventHedge := strings.TrimSpace(pcfg.FirstEventHedge)
+	if firstEventHedge == "" {
+		firstEventHedge = "auto"
+	}
+	firstEventHedgeModels := []string{"gemini-4-argon"}
+
 	concurrency := 2
 	if pcfg.PerAccountConcurrency != nil && *pcfg.PerAccountConcurrency > 0 {
 		concurrency = *pcfg.PerAccountConcurrency
@@ -226,10 +236,13 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 		AccountCooldown:       accountCooldown,
 		SessionTTL:            sessionTTL,
 		InitTimeout:           initTimeout,
+		FirstEventHedge:       firstEventHedge,
+		FirstEventHedgeModels: firstEventHedgeModels,
 		ModelMapping:          modelMapping,
 		SaveHistory:           boolOrDefault(pcfg.SaveHistory, false),
+		NonstreamKeepalive:    true,
+		FakeStream:            boolOrDefault(pcfg.FakeStream, false),
 		LogLevel:              logLevel,
-		LogFormat:             "text",
 		RequestBodyLog:        boolOrDefault(pcfg.RequestBodyLog, false),
 		LogFile:               boolOrDefault(pcfg.LogFile, false),
 		LogMaxTotalMB:         logMaxMB,

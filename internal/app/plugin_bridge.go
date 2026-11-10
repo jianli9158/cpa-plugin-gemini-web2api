@@ -8,11 +8,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
 	"github.com/Mag1cFall/Gemini-Web2API/internal/accounts"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/adapter"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/auth"
@@ -26,7 +26,7 @@ const dataDir = "data"
 
 // Version returns the plugin runtime version.
 func Version() string {
-	return "1.0.0"
+	return "1.0.2"
 }
 
 func authDir(paths []string) string {
@@ -119,10 +119,43 @@ func NewPluginRuntime(ctx context.Context, cfg config.Config, runtimeDataDir str
 		return nil, fmt.Errorf("create auth dir: %w", err)
 	}
 
-	pool := balancer.NewAccountPool(cfg.AccountCooldown, cfg.SessionTTL)
+	config.SetModelMapping(cfg.ModelMapping)
 	adapter.ConfigureSessionTTL(cfg.SessionTTL)
+	pool := balancer.NewAccountPool(cfg.AccountCooldown, cfg.SessionTTL)
+	if stored, err := store.Cooldowns(runtimeCtx, time.Now()); err == nil && len(stored) > 0 {
+		restored := make([]balancer.Cooldown, 0, len(stored))
+		for _, sc := range stored {
+			restored = append(restored, balancer.Cooldown{
+				Account: sc.Account,
+				Model:   sc.Model,
+				Until:   sc.Until,
+				Reason:  sc.Reason,
+			})
+		}
+		pool.RestoreCooldowns(restored)
+	}
+	pool.OnCooldownChange(func(cooldowns []balancer.Cooldown) {
+		stored := make([]requestdb.StoredCooldown, 0, len(cooldowns))
+		for _, c := range cooldowns {
+			stored = append(stored, requestdb.StoredCooldown{
+				Account: c.Account,
+				Model:   c.Model,
+				Until:   c.Until,
+				Reason:  c.Reason,
+			})
+		}
+		if err := store.SaveCooldowns(runtimeCtx, stored); err != nil {
+			logging.Warn(logging.SourceService, "保存账号冷却失败", "错误", err)
+		}
+	})
 	pool.SetStrategy(cfg.RoutingStrategy)
-
+	seconds, _ := strconv.Atoi(cfg.FirstEventHedge)
+	adapter.SetFirstEventHedge(adapter.FirstEventHedge{
+		Auto:   cfg.FirstEventHedge == "auto",
+		After:  time.Duration(seconds) * time.Second,
+		Models: cfg.FirstEventHedgeModels,
+	})
+	adapter.SetResponseModes(cfg.NonstreamKeepalive, cfg.FakeStream)
 	manager := accounts.New(runtimeCtx, pool, accounts.Settings{
 		InitTimeout:   cfg.InitTimeout,
 		RetryInterval: cfg.AccountCooldown,
