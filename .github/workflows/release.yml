@@ -32,7 +32,7 @@ jobs:
             ext: .dylib
           - goos: darwin
             goarch: amd64
-            os: macos-15
+            os: macos-15-intel
             ext: .dylib
           - goos: linux
             goarch: amd64
