@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/cpa"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/pluginabi"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/pluginapi"
 )
@@ -97,7 +98,7 @@ func TestPluginLifecycleAndCapabilities(t *testing.T) {
 	hasPrefixed := false
 	hasUnprefixed := false
 	for _, m := range modelResp.Models {
-		if m.ID == "gemini-2.5-pro" || m.ID == "gemini-3.0-pro" || m.ID == "gemini-2.5-flash" {
+		if m.ID == "gemini-3.8-flash" || m.ID == "gemini-4-carbon" || m.ID == "gemini-4-argon" {
 			hasUnprefixed = true
 		}
 		if strings.HasPrefix(m.ID, "gemini-web/") {
@@ -351,6 +352,113 @@ func TestAuthFileDisabledSyncOnServiceStopAndShutdown(t *testing.T) {
 		t.Fatalf("plugin.quiesce failed: %v", err)
 	}
 	checkDiskDisabled(true, true, "after plugin.quiesce")
+}
+
+func TestPluginReloadAndSchedulerFiltering(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := cpa.NewPlugin(nil)
+	defer func() {
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, []byte(`{}`))
+	}()
+
+	cfg1 := []byte("data_dir: " + tmpDir + "\nauto_start: false\nguest_enabled: false\nrouting_strategy: fill-first\naccount_order: acc2@example.com,acc1@example.com\nmodel_accounts: gemini-4-carbon:acc1@example.com\nfirst_event_hedge: 15s\nfirst_event_hedge_models: gemini-4-carbon,gemini-4-argon\n")
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    cfg1,
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq); err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+
+	parsedCfg := p.Config()
+	if parsedCfg.AccountOrder != "acc2@example.com,acc1@example.com" || parsedCfg.ModelAccounts != "gemini-4-carbon:acc1@example.com" {
+		t.Fatalf("unexpected parsed config fields: %+v", parsedCfg)
+	}
+
+	rt, err := p.Runtime()
+	if err != nil {
+		t.Fatalf("Runtime() failed: %v", err)
+	}
+	for _, accID := range []string{"acc1@example.com", "acc2@example.com"} {
+		client, err := gemini.NewClient(gemini.AccountSource{ID: accID, Concurrency: 1}, "", false)
+		if err != nil {
+			t.Fatalf("NewClient(%s) failed: %v", accID, err)
+		}
+		rt.Pool.Add(client, accID)
+	}
+
+	if !rt.Pool.AllowsAccountForModel(t.Context(), "acc1@example.com", "gemini-4-carbon") {
+		t.Fatalf("expected acc1 to be allowed for gemini-4-carbon")
+	}
+	if rt.Pool.AllowsAccountForModel(t.Context(), "acc2@example.com", "gemini-4-carbon") {
+		t.Fatalf("expected acc2 to be excluded for gemini-4-carbon")
+	}
+
+	pickModel := func(model string) string {
+		t.Helper()
+		schedReq, _ := json.Marshal(pluginapi.SchedulerPickRequest{
+			Provider: "gemini-web2api",
+			Model:    model,
+			Candidates: []pluginapi.SchedulerAuthCandidate{
+				{
+					ID:         "gemini-web2api-acc1.json",
+					Provider:   "gemini-web2api",
+					Status:     "active",
+					Attributes: map[string]string{"provider": "gemini-web2api", "account_id": "acc1@example.com"},
+				},
+				{
+					ID:         "gemini-web2api-acc2.json",
+					Provider:   "gemini-web2api",
+					Status:     "active",
+					Attributes: map[string]string{"provider": "gemini-web2api", "account_id": "acc2@example.com"},
+				},
+			},
+		})
+		res, err := p.HandleMethod(pluginabi.MethodSchedulerPick, schedReq)
+		if err != nil {
+			t.Fatalf("scheduler.pick(%s) failed: %v", model, err)
+		}
+		resp := res.(pluginapi.SchedulerPickResponse)
+		if !resp.Handled || resp.Reject {
+			t.Fatalf("unexpected scheduler.pick(%s) response: %+v", model, resp)
+		}
+		return resp.AuthID
+	}
+
+	// fill-first + account_order puts acc2 first, so unrestricted model picks acc2.
+	if got := pickModel("gemini-3.8-flash"); got != "gemini-web2api-acc2.json" {
+		t.Fatalf("expected acc2 first under fill-first account_order, got %s", got)
+	}
+	// model_accounts restricts gemini-4-carbon to acc1 only.
+	if got := pickModel("gemini-4-carbon"); got != "gemini-web2api-acc1.json" {
+		t.Fatalf("expected acc1 for model_accounts-restricted gemini-4-carbon, got %s", got)
+	}
+
+	// Reconfigure live via plugin.reconfigure (ApplyConfig path) and verify updated bindings + round-robin take effect.
+	cfg2 := []byte("data_dir: " + tmpDir + "\nauto_start: false\nguest_enabled: false\nrouting_strategy: round-robin\naccount_order: acc1@example.com,acc2@example.com\nmodel_accounts: gemini-4-carbon:acc2@example.com\nfirst_event_hedge: off\n")
+	reconfReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    cfg2,
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginReconfigure, reconfReq); err != nil {
+		t.Fatalf("plugin.reconfigure failed: %v", err)
+	}
+	if rt.Pool.AllowsAccountForModel(t.Context(), "acc1@example.com", "gemini-4-carbon") {
+		t.Fatalf("expected acc1 to be excluded after reconfigure")
+	}
+	if !rt.Pool.AllowsAccountForModel(t.Context(), "acc2@example.com", "gemini-4-carbon") {
+		t.Fatalf("expected acc2 to be allowed after reconfigure")
+	}
+	if got := pickModel("gemini-4-carbon"); got != "gemini-web2api-acc2.json" {
+		t.Fatalf("expected acc2 for gemini-4-carbon after reconfigure, got %s", got)
+	}
+
+	// Under round-robin, unrestricted picks should alternate between acc1 and acc2.
+	first := pickModel("gemini-3.8-flash")
+	second := pickModel("gemini-3.8-flash")
+	if first == second {
+		t.Fatalf("expected round-robin to alternate between acc1 and acc2, got %s twice", first)
+	}
 }
 
 func TestBuiltDynamicLibraryExists(t *testing.T) {

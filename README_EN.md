@@ -20,8 +20,8 @@
 
 - **Pure Go Native Shared Library · Zero External Runtime Dependencies**: Uses `bogdanfinn/tls-client` to emulate Chrome 131 TLS/HTTP2 fingerprints directly inside the compiled shared library (`.dylib` / `.so` / `.dll`)—no Python, Node.js, Playwright, or headless browser required.
 - **Full Google Gemini Web Model & Feature Coverage**:
-  - **Core Chat & Reasoning Models**: `gemini-3.0-pro`, `gemini-3.0-flash`, `gemini-3.0-flash-thinking` (plus compatibility aliases `gemini-2.5-pro`, `gemini-2.5-flash`), with Thinking Level controls.
-  - **Feature Variants & Multimodal**: `gemini-image` (image generation & editing), `gemini-video` (Veo video generation), `gemini-music` (Lyria music), `gemini-canvas`, `gemini-deep-research`, `gemini-learning`, `gemini-task`, and audio TTS/STT (`/v1/audio/*`).
+  - **Core Chat & Reasoning Models**: `gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-4-carbon`, `gemini-4-argon` (plus `-task` variants and custom model mappings), with Thinking Level controls.
+  - **Feature Variants & Multimodal**: `gemini-3.1-flash-image` (image generation & editing), `gemini-video` (Veo video generation), `gemini-music` (Lyria music), `gemini-canvas`, `gemini-deep-research`, `gemini-guided-learning`, and audio TTS/STT (`/v1/audio/*`).
 - **Keyless Guest Session + Multi-Source Google Account Pool**:
   - Out-of-the-box **keyless Guest session** support;
   - **One-click isolated local Chrome login** and **Cookie / Playwright StorageState import**;
@@ -108,6 +108,10 @@ plugins:
       guest_enabled: true
       per_account_concurrency: 1
       routing_strategy: "round-robin"
+      account_order: ""
+      model_accounts: ""
+      first_event_hedge: "auto"
+      first_event_hedge_models: "gemini-4-carbon,gemini-4-argon"
       account_cooldown: "2m"
       session_ttl: "30m"
       init_timeout: "20s"

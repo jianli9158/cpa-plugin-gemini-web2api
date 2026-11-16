@@ -26,7 +26,7 @@ const dataDir = "data"
 
 // Version returns the plugin runtime version.
 func Version() string {
-	return "1.0.2"
+	return "1.0.3"
 }
 
 func authDir(paths []string) string {
@@ -149,12 +149,9 @@ func NewPluginRuntime(ctx context.Context, cfg config.Config, runtimeDataDir str
 		}
 	})
 	pool.SetStrategy(cfg.RoutingStrategy)
-	seconds, _ := strconv.Atoi(cfg.FirstEventHedge)
-	adapter.SetFirstEventHedge(adapter.FirstEventHedge{
-		Auto:   cfg.FirstEventHedge == "auto",
-		After:  time.Duration(seconds) * time.Second,
-		Models: cfg.FirstEventHedgeModels,
-	})
+	pool.SetAccountOrder(cfg.AccountOrder)
+	pool.SetModelAccounts(cfg.ModelAccounts)
+	adapter.SetFirstEventHedge(parseFirstEventHedge(cfg))
 	adapter.SetResponseModes(cfg.NonstreamKeepalive, cfg.FakeStream)
 	manager := accounts.New(runtimeCtx, pool, accounts.Settings{
 		InitTimeout:   cfg.InitTimeout,
@@ -187,6 +184,7 @@ func NewPluginRuntime(ctx context.Context, cfg config.Config, runtimeDataDir str
 		StartedAt: startedAt,
 		stopping:  stopping,
 	}
+	go adapter.CleanupTemporaryChats(runtimeCtx, pool)
 
 	if autoStart {
 		go rt.StartBackground(guestEnabled)
@@ -207,9 +205,10 @@ func (rt *PluginRuntime) StartBackground(guestEnabled bool) {
 	}
 	rt.started = true
 	rt.running.Store(true)
+	authPaths := append([]string(nil), rt.Cfg.AuthStatePaths...)
 	rt.startMu.Unlock()
 
-	loaded, err := auth.LoadFiles(rt.Cfg.AuthStatePaths)
+	loaded, err := auth.LoadFiles(authPaths)
 	if err != nil {
 		logging.Warn(logging.SourceService, "加载认证目录失败", "错误", err)
 	}
@@ -225,7 +224,59 @@ func (rt *PluginRuntime) StartBackground(guestEnabled bool) {
 	}
 }
 
-// Close stops all account workers, closes SSE streams, and closes the SQLite request store.
+// ApplyConfig updates runtime settings in place when the plugin is reloaded.
+func (rt *PluginRuntime) ApplyConfig(next config.Config, guestEnabled bool) {
+	if rt == nil {
+		return
+	}
+	rt.startMu.Lock()
+	rt.Cfg = next
+	rt.startMu.Unlock()
+	config.SetModelMapping(next.ModelMapping)
+	rt.Pool.SetTimings(next.AccountCooldown, next.SessionTTL)
+	adapter.ConfigureSessionTTL(next.SessionTTL)
+	if level, err := logging.ParseLevel(next.LogLevel); err == nil {
+		logging.SetLevel(level)
+	}
+	rt.Store.SetBodyCapture(next.RequestBodyLog)
+	rt.Pool.SetStrategy(next.RoutingStrategy)
+	rt.Pool.SetAccountOrder(next.AccountOrder)
+	rt.Pool.SetModelAccounts(next.ModelAccounts)
+	adapter.SetFirstEventHedge(parseFirstEventHedge(next))
+	adapter.SetResponseModes(next.NonstreamKeepalive, next.FakeStream)
+	rt.Accounts.SetSettings(accounts.Settings{
+		InitTimeout:   next.InitTimeout,
+		RetryInterval: next.AccountCooldown,
+		Proxy:         next.ProxyURL,
+		SaveHistory:   next.SaveHistory,
+		AuthDir:       rt.AuthDir,
+		Concurrency:   next.PerAccountConcurrency,
+	})
+	if !guestEnabled {
+		rt.Accounts.StopGuest()
+	} else if st := rt.Pool.Status(); st.Guest == nil && rt.running.Load() {
+		rt.Accounts.RelaunchGuest()
+	}
+}
+
+func parseFirstEventHedge(cfg config.Config) adapter.FirstEventHedge {
+	mode := strings.TrimSpace(cfg.FirstEventHedge)
+	if strings.EqualFold(mode, "off") {
+		return adapter.FirstEventHedge{Auto: false, After: 0, Models: cfg.FirstEventHedgeModels}
+	}
+	if mode == "" || strings.EqualFold(mode, "auto") {
+		return adapter.FirstEventHedge{Auto: true, Models: cfg.FirstEventHedgeModels}
+	}
+	if seconds, err := strconv.Atoi(mode); err == nil && seconds > 0 {
+		return adapter.FirstEventHedge{After: time.Duration(seconds) * time.Second, Models: cfg.FirstEventHedgeModels}
+	}
+	if d, err := time.ParseDuration(mode); err == nil && d > 0 {
+		return adapter.FirstEventHedge{After: d, Models: cfg.FirstEventHedgeModels}
+	}
+	return adapter.FirstEventHedge{Auto: true, Models: cfg.FirstEventHedgeModels}
+}
+
+// Close stops all account workers, deletes temporary web chats, closes SSE streams, and closes the SQLite request store.
 func (rt *PluginRuntime) Close() error {
 	if rt == nil {
 		return nil
@@ -234,10 +285,16 @@ func (rt *PluginRuntime) Close() error {
 	rt.stopOnce.Do(func() {
 		close(rt.stopping)
 	})
+	if rt.Pool != nil {
+		cleanupCtx, stopCleanup := context.WithTimeout(context.Background(), 10*time.Second)
+		adapter.DeleteTemporaryChats(cleanupCtx, rt.Pool)
+		stopCleanup()
+	}
 	if rt.cancel != nil {
 		rt.cancel()
 	}
 	if rt.Store != nil {
+		adapter.DetachStorage(rt.Store)
 		return rt.Store.Close()
 	}
 	return nil

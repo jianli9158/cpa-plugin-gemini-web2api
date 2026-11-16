@@ -89,12 +89,23 @@ func (p *Plugin) handleSchedulerPick(raw []byte) (any, error) {
 	poolStatus := rt.Pool.Status()
 	now := time.Now()
 
-	// First pass: prefer ready, non-cooling accounts with highest context window and idle slots
+	p.mu.RLock()
+	routingStrategy := strings.ToLower(strings.TrimSpace(p.appCfg.RoutingStrategy))
+	p.mu.RUnlock()
+
+	// Prefer ready, allowed, non-cooling accounts supporting cleanModel with highest context window and idle slots.
 	var bestAuthID string
 	bestContextWindow := -1
 	bestIdle := false
 
-	for _, acc := range poolStatus.Accounts {
+	accounts := poolStatus.Accounts
+	start := 0
+	if len(accounts) > 1 && routingStrategy != "fill-first" {
+		start = int((p.rrCursor.Add(1) - 1) % uint64(len(accounts)))
+	}
+
+	for offset := 0; offset < len(accounts); offset++ {
+		acc := accounts[(start+offset)%len(accounts)]
 		if !acc.Enabled || acc.State != balancer.StateReady {
 			continue
 		}
@@ -110,6 +121,16 @@ func (p *Plugin) handleSchedulerPick(raw []byte) (any, error) {
 		}
 		if modelCooling {
 			continue
+		}
+		if !rt.Pool.AllowsAccountForModel(p.ctx, acc.AccountID, cleanModel) {
+			continue
+		}
+		if cleanModel != "" {
+			if client := rt.Pool.Client(acc.AccountID); client != nil && len(client.Models()) > 0 {
+				if _, resolveErr := client.ResolveModel(cleanModel); resolveErr != nil {
+					continue
+				}
+			}
 		}
 		authID, ok := candidateByAccount[strings.ToLower(strings.TrimSpace(acc.AccountID))]
 		if !ok || authID == "" {

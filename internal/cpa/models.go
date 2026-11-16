@@ -312,21 +312,10 @@ func defaultFallbackModels() []adapter.CatalogModel {
 	return []adapter.CatalogModel{
 		{
 			Model: gemini.Model{
-				ID:             "gemini-2.5-pro",
-				DisplayName:    "Gemini 2.5 Pro",
-				Description:    "Google Gemini Web 2.5 Pro with deep reasoning & multimodal context",
-				Capabilities:   []string{"thinking"},
-				ThinkingLevels: []gemini.ThinkingLevel{gemini.ThinkingHigh},
-			},
-			MinInputTokenLimit: 1048576,
-			MaxInputTokenLimit: 1048576,
-		},
-		{
-			Model: gemini.Model{
-				ID:             "gemini-2.5-flash",
-				DisplayName:    "Gemini 2.5 Flash",
-				Description:    "Google Gemini Web 2.5 Flash fast multimodal model",
-				Capabilities:   []string{"thinking"},
+				ID:             "gemini-3.8-flash",
+				DisplayName:    "3.8 Flash",
+				Description:    "Google Gemini Web 3.8 Flash fast everyday model",
+				Capabilities:   []string{"generateContent", "streamGenerateContent"},
 				ThinkingLevels: []gemini.ThinkingLevel{gemini.ThinkingLow, gemini.ThinkingMedium, gemini.ThinkingHigh},
 				Default:        true,
 			},
@@ -335,22 +324,33 @@ func defaultFallbackModels() []adapter.CatalogModel {
 		},
 		{
 			Model: gemini.Model{
-				ID:             "gemini-3-pro",
-				DisplayName:    "Gemini 3 Pro",
-				Description:    "Google Gemini Web 3 Pro",
-				Capabilities:   []string{"thinking"},
-				ThinkingLevels: []gemini.ThinkingLevel{gemini.ThinkingHigh},
+				ID:             "gemini-3.5-flash-lite",
+				DisplayName:    "3.5 Flash Lite",
+				Description:    "Google Gemini Web 3.5 Flash Lite lightweight model",
+				Capabilities:   []string{"generateContent", "streamGenerateContent"},
+				ThinkingLevels: []gemini.ThinkingLevel{gemini.ThinkingLow, gemini.ThinkingMedium, gemini.ThinkingHigh},
 			},
 			MinInputTokenLimit: 1048576,
 			MaxInputTokenLimit: 1048576,
 		},
 		{
 			Model: gemini.Model{
-				ID:             "gemini-3-flash",
-				DisplayName:    "Gemini 3 Flash",
-				Description:    "Google Gemini Web 3 Flash",
-				Capabilities:   []string{"thinking"},
+				ID:             "gemini-4-carbon",
+				DisplayName:    "4 Carbon",
+				Description:    "Google Gemini Web 4 Carbon balanced reasoning model",
+				Capabilities:   []string{"generateContent", "streamGenerateContent"},
 				ThinkingLevels: []gemini.ThinkingLevel{gemini.ThinkingLow, gemini.ThinkingMedium, gemini.ThinkingHigh},
+			},
+			MinInputTokenLimit: 1048576,
+			MaxInputTokenLimit: 1048576,
+		},
+		{
+			Model: gemini.Model{
+				ID:             "gemini-4-argon",
+				DisplayName:    "4 Argon",
+				Description:    "Google Gemini Web 4 Argon deep reasoning model",
+				Capabilities:   []string{"generateContent", "streamGenerateContent"},
+				ThinkingLevels: []gemini.ThinkingLevel{gemini.ThinkingLow, gemini.ThinkingHigh},
 			},
 			MinInputTokenLimit: 1048576,
 			MaxInputTokenLimit: 1048576,

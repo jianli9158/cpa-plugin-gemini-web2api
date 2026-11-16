@@ -13,7 +13,7 @@ import (
 
 const (
 	PluginID      = "gemini-web2api"
-	PluginVersion = "1.0.2"
+	PluginVersion = "1.0.3"
 	ProviderID    = "gemini-web2api"
 )
 
@@ -30,8 +30,11 @@ type PluginConfig struct {
 	SessionTTL            string            `json:"session_ttl" yaml:"session_ttl"`
 	InitTimeout           string            `json:"init_timeout" yaml:"init_timeout"`
 	FirstEventHedge       string            `json:"first_event_hedge" yaml:"first_event_hedge"`
+	FirstEventHedgeModels string            `json:"first_event_hedge_models" yaml:"first_event_hedge_models"`
 	PerAccountConcurrency *int              `json:"per_account_concurrency" yaml:"per_account_concurrency"`
 	RoutingStrategy       string            `json:"routing_strategy" yaml:"routing_strategy"`
+	AccountOrder          string            `json:"account_order" yaml:"account_order"`
+	ModelAccounts         string            `json:"model_accounts" yaml:"model_accounts"`
 	RequestBodyLog        *bool             `json:"request_body_log" yaml:"request_body_log"`
 	LogFile               *bool             `json:"log_file" yaml:"log_file"`
 	LogMaxTotalMB         *int              `json:"log_max_total_mb" yaml:"log_max_total_mb"`
@@ -97,11 +100,20 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 			if pcfg.FirstEventHedge == "" {
 				pcfg.FirstEventHedge = opt.FirstEventHedge
 			}
+			if pcfg.FirstEventHedgeModels == "" {
+				pcfg.FirstEventHedgeModels = opt.FirstEventHedgeModels
+			}
 			if pcfg.PerAccountConcurrency == nil {
 				pcfg.PerAccountConcurrency = opt.PerAccountConcurrency
 			}
 			if pcfg.RoutingStrategy == "" {
 				pcfg.RoutingStrategy = opt.RoutingStrategy
+			}
+			if pcfg.AccountOrder == "" {
+				pcfg.AccountOrder = opt.AccountOrder
+			}
+			if pcfg.ModelAccounts == "" {
+				pcfg.ModelAccounts = opt.ModelAccounts
 			}
 			if pcfg.RequestBodyLog == nil {
 				pcfg.RequestBodyLog = opt.RequestBodyLog
@@ -184,12 +196,14 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 		}
 	}
 
-	firstEventHedge := strings.TrimSpace(pcfg.FirstEventHedge)
+	firstEventHedge := strings.ToLower(strings.TrimSpace(pcfg.FirstEventHedge))
 	if firstEventHedge == "" {
 		firstEventHedge = "auto"
 	}
-	firstEventHedgeModels := []string{"gemini-4-argon"}
-
+	firstEventHedgeModels := config.SplitList(config.Defaults["FIRST_EVENT_HEDGE_MODELS"])
+	if s := strings.TrimSpace(pcfg.FirstEventHedgeModels); s != "" {
+		firstEventHedgeModels = config.SplitList(s)
+	}
 	concurrency := 2
 	if pcfg.PerAccountConcurrency != nil && *pcfg.PerAccountConcurrency > 0 {
 		concurrency = *pcfg.PerAccountConcurrency
@@ -228,6 +242,14 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 		}
 	}
 
+	accountOrder := config.SplitList(pcfg.AccountOrder)
+	var modelAccounts map[string][]string
+	if s := strings.TrimSpace(pcfg.ModelAccounts); s != "" {
+		if parsed, err := config.ParseModelAccounts(s); err == nil {
+			modelAccounts = parsed
+		}
+	}
+
 	cfg := config.Config{
 		ListenAddress:         "127.0.0.1:0",
 		AuthStatePaths:        []string{accountsDir},
@@ -238,6 +260,8 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 		InitTimeout:           initTimeout,
 		FirstEventHedge:       firstEventHedge,
 		FirstEventHedgeModels: firstEventHedgeModels,
+		AccountOrder:          accountOrder,
+		ModelAccounts:         modelAccounts,
 		ModelMapping:          modelMapping,
 		SaveHistory:           boolOrDefault(pcfg.SaveHistory, false),
 		NonstreamKeepalive:    true,

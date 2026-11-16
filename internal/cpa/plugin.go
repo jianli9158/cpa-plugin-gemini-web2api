@@ -31,6 +31,7 @@ type Plugin struct {
 	chromeLogin    sync.Mutex
 	serviceStopped atomic.Bool
 	lastRegisterNs atomic.Int64
+	rrCursor       atomic.Uint64
 }
 
 type loginSessionState struct {
@@ -265,6 +266,30 @@ func (p *Plugin) handleRegister(raw []byte) (any, error) {
 					Default:     false,
 					Description: "Fake streaming: collect full response upstream before streaming events to client",
 				},
+				{
+					Name:        "account_order",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Default:     "",
+					Description: "Comma-separated account IDs ordered by priority for fill-first routing",
+				},
+				{
+					Name:        "model_accounts",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Default:     "",
+					Description: "Comma-separated model:acc1|acc2 bindings restricting specific models to specific accounts",
+				},
+				{
+					Name:        "first_event_hedge",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Default:     "auto",
+					Description: "First-event backup hedge mode (auto, off, or positive duration/seconds)",
+				},
+				{
+					Name:        "first_event_hedge_models",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Default:     "gemini-4-carbon,gemini-4-argon",
+					Description: "Comma-separated model IDs eligible for first-event backup hedging",
+				},
 			},
 		},
 		Capabilities: rpcCapabilities{
@@ -304,24 +329,26 @@ func (p *Plugin) applyConfig(configYAML []byte) error {
 		return err
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.pluginCfg = pcfg
 	p.appCfg = cfg
 	p.dataDir = dataDir
 	p.lastRegisterNs.Store(time.Now().UnixNano())
 	p.serviceStopped.Store(false)
-	if p.runtime == nil {
-		rt, err := app.NewPluginRuntime(p.ctx, cfg, dataDir, boolOrDefault(pcfg.AutoStart, true), boolOrDefault(pcfg.GuestEnabled, true))
+	rt := p.runtime
+	created := false
+	if rt == nil {
+		rt, err = app.NewPluginRuntime(p.ctx, cfg, dataDir, boolOrDefault(pcfg.AutoStart, true), boolOrDefault(pcfg.GuestEnabled, true))
 		if err != nil {
+			p.mu.Unlock()
 			return err
 		}
 		p.runtime = rt
-		if boolOrDefault(pcfg.SyncAuthFiles, true) {
-			p.setHostAuthFilesDisabled(rt, false)
-		}
-		return nil
+		created = true
 	}
-	rt := p.runtime
+	p.mu.Unlock()
+	if !created && rt != nil {
+		rt.ApplyConfig(cfg, boolOrDefault(pcfg.GuestEnabled, true))
+	}
 	if boolOrDefault(pcfg.SyncAuthFiles, true) && rt != nil {
 		p.setHostAuthFilesDisabled(rt, false)
 	}

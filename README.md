@@ -20,8 +20,8 @@
 
 - **纯 Go 原生编译 · 零外部运行时依赖**：基于 `bogdanfinn/tls-client` 模拟 Chrome 131 浏览器指纹，直接编译为原生共享库（`.dylib` / `.so` / `.dll`），无需 Python、Node.js、Playwright 或无头浏览器。
 - **全功能 Google Gemini Web 模型与能力接入**：
-  - **核心对话与推理模型**：支持 `gemini-3.0-pro`、`gemini-3.0-flash`、`gemini-3.0-flash-thinking`（及兼容别名 `gemini-2.5-pro`、`gemini-2.5-flash` 等），支持思维链（Thinking Levels）控制。
-  - **专属功能变体与多模态**：支持 `gemini-image`（绘图生成/编辑）、`gemini-video`（Veo 视频生成）、`gemini-music`（Lyria 音乐）、`gemini-canvas`、`gemini-deep-research`（深度研究）、`gemini-learning`、`gemini-task` 以及语音 TTS/STT（`/v1/audio/*`）。
+  - **核心对话与推理模型**：支持 `gemini-3.8-flash`、`gemini-3.5-flash-lite`、`gemini-4-carbon`、`gemini-4-argon`（含 `-task` 变体与兼容模型映射），支持思维链（Thinking Levels）控制。
+  - **专属功能变体与多模态**：支持 `gemini-3.1-flash-image`（绘图生成/编辑）、`gemini-video`（Veo 视频生成）、`gemini-music`（Lyria 音乐）、`gemini-canvas`、`gemini-deep-research`（深度研究）、`gemini-guided-learning` 以及语音 TTS/STT（`/v1/audio/*`）。
 - **免登录访客会话 + 多源 Google 账号池**：
   - 支持**免登录访客（Guest）会话**开箱即用；
   - 支持**本机 Chrome 独立无痕窗口一键登录**与**Cookie / Playwright StorageState 粘贴导入**；
@@ -108,6 +108,10 @@ plugins:
       guest_enabled: true
       per_account_concurrency: 1
       routing_strategy: "round-robin"
+      account_order: ""
+      model_accounts: ""
+      first_event_hedge: "auto"
+      first_event_hedge_models: "gemini-4-carbon,gemini-4-argon"
       account_cooldown: "2m"
       session_ttl: "30m"
       init_timeout: "20s"
@@ -123,12 +127,16 @@ plugins:
 | `proxy` | `string` | `""` | 访问 `gemini.google.com` 的上游代理（支持 `http://`、`https://`、`socks5://`） |
 | `per_account_concurrency` | `int` | `1` | 单 Google 账号最大并发请求数 |
 | `routing_strategy` | `string` | `"round-robin"` | 多账号路由策略（`round-robin` 轮询 / `fill-first` 优先占满） |
+| `account_order` | `string` | `""` | `fill-first` 模式下逗号分隔的账号优先级顺序 |
+| `model_accounts` | `string` | `""` | 按模型限定可用账号（如 `gemini-4-carbon:acc1|acc2`） |
+| `first_event_hedge` | `string` | `"auto"` | 首事件备用请求方式（`auto` / `off` / 毫秒或秒数如 `15s`） |
+| `first_event_hedge_models` | `string` | `"gemini-4-carbon,gemini-4-argon"` | 启用首事件备用请求的模型列表 |
 | `account_cooldown` | `string` | `"2m"` | 账号触发限流或异常后的默认冷却时长 |
 | `session_ttl` | `string` | `"30m"` | 多轮对话上下文绑定同一账号的保持时长 |
 | `init_timeout` | `string` | `"20s"` | 单个账号初始化探测超时时长 |
-| `model_mapping` | `map[string]string` | `{}` | 自定义模型别名映射（如 `{"my-gemini": "gemini-3.0-pro"}`） |
-| `model_prefix` | `string` | `"gemini-web/"` | 模型路由前缀（如 `gemini-web/gemini-3.0-pro`） |
-| `route_unprefixed_models` | `bool` | `true` | 是否直接路由无前缀 Gemini Web 模型（如 `gemini-3.0-pro`、`gemini-image`） |
+| `model_mapping` | `map[string]string` | `{}` | 自定义模型别名映射（如 `{"my-gemini": "gemini-4-carbon"}`） |
+| `model_prefix` | `string` | `"gemini-web/"` | 模型路由前缀（如 `gemini-web/gemini-4-carbon`） |
+| `route_unprefixed_models` | `bool` | `true` | 是否直接路由无前缀 Gemini Web 模型（如 `gemini-4-carbon`、`gemini-3.1-flash-image`） |
 | `sync_auth_files` | `bool` | `true` | 导入/删除账号时自动在 `~/.cli-proxy-api/` 下 1 对 1 同步/清理 `gemini-web2api-<id>.json` |
 
 ---
@@ -151,12 +159,12 @@ plugins:
 ## 调用示例
 
 ```bash
-# 调用 Gemini 3.0 Pro 对话模型
+# 调用 Gemini 4 Carbon 对话模型
 curl http://127.0.0.1:8317/v1/chat/completions \
   -H "Authorization: Bearer YOUR_CPA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-3.0-pro",
+    "model": "gemini-4-carbon",
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true
   }'
@@ -166,7 +174,7 @@ curl http://127.0.0.1:8317/v1/chat/completions \
   -H "Authorization: Bearer YOUR_CPA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-web/gemini-3.0-flash-thinking",
+    "model": "gemini-web/gemini-3.8-flash",
     "messages": [{"role": "user", "content": "Explain quantum entanglement"}],
     "stream": true
   }'

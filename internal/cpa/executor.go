@@ -111,7 +111,7 @@ func (p *Plugin) buildInternalHTTPRequest(
 	switch format {
 	case "gemini":
 		if cleanModel == "" {
-			cleanModel = "gemini-2.5-flash"
+			cleanModel = "gemini-3.8-flash"
 		}
 		lowerModel := strings.ToLower(cleanModel)
 		switch {
@@ -433,7 +433,7 @@ func (p *Plugin) handleExecutorCountTokens(raw []byte) (any, error) {
 	cleanModel := StripModelPrefix(req.Model, p.Config().ModelPrefix)
 	cleanModel = strings.TrimPrefix(cleanModel, "models/")
 	if cleanModel == "" {
-		cleanModel = "gemini-2.5-flash"
+		cleanModel = "gemini-3.8-flash"
 	}
 
 	format := strings.ToLower(strings.TrimSpace(req.Format))
