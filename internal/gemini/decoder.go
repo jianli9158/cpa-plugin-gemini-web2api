@@ -767,6 +767,9 @@ var imageAttributePattern = regexp.MustCompile(`(\w+)="([^"]*)"`)
 
 // expandImageResults 把正文中的图片轮播标记换成富内容第 2 项列出的网页图片，每张图片写为链接到来源页的 Markdown 图片
 func expandImageResults(candidate []any, raw string) string {
+	if !strings.Contains(raw, "<Image") {
+		return raw
+	}
 	list, _ := richContentField(candidate, 1)
 	items, _ := list.([]any)
 	images := make(map[string][2]string)
@@ -949,19 +952,24 @@ func takeCitations(text string, tables []citationTable) (string, []Citation) {
 
 // expandDocuments 把 Deep Research 计划占位链接换成计划标题与步骤；回答完成后把文档占位链接换成 candidate[30] 的文档内容，完成前正文截止到第一个文档占位链接
 func expandDocuments(candidate []any, raw string) string {
-	if plan, ok := richContentField(candidate, 55); ok {
-		raw = researchPlanPattern.ReplaceAllStringFunc(raw, func(string) string {
-			title, _ := stringPath(plan, 0)
-			lines := []string{title}
-			steps, _ := valuePath(plan, 1)
-			stepValues, _ := steps.([]any)
-			for _, step := range stepValues {
-				label, _ := stringPath(step, 1)
-				detail, _ := stringPath(step, 2)
-				lines = append(lines, strings.TrimSpace(label+"\n"+detail))
-			}
-			return strings.Join(lines, "\n\n")
-		})
+	if strings.Contains(raw, "googleusercontent.com/deep_research_confirmation_content/") {
+		if plan, ok := richContentField(candidate, 55); ok {
+			raw = researchPlanPattern.ReplaceAllStringFunc(raw, func(string) string {
+				title, _ := stringPath(plan, 0)
+				lines := []string{title}
+				steps, _ := valuePath(plan, 1)
+				stepValues, _ := steps.([]any)
+				for _, step := range stepValues {
+					label, _ := stringPath(step, 1)
+					detail, _ := stringPath(step, 2)
+					lines = append(lines, strings.TrimSpace(label+"\n"+detail))
+				}
+				return strings.Join(lines, "\n\n")
+			})
+		}
+	}
+	if !strings.Contains(raw, "googleusercontent.com/immersive_entry_chip/") {
+		return raw
 	}
 	chips := documentChipPattern.FindAllStringIndex(raw, -1)
 	if len(chips) == 0 {

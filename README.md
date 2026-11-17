@@ -12,13 +12,13 @@
 
 > **项目说明与致谢（Upstream Attribution）**  
 > 本项目是将 **[Mag1cFall/Gemini-Web2API](https://github.com/Mag1cFall/Gemini-Web2API)** 完整移植为 **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** 原生动态库插件（Native C ABI v1 / Schema v10）的开源项目。  
-> 核心协议栈（`gemini.google.com` Bard/StreamGenerate 批量 RPC、Chrome 131 TLS/HTTP2 指纹伪装、Cookie 自动轮换保活、免登录访客会话池、多账号轮询/填充负载均衡与多协议转换）均源自 **[Mag1cFall/Gemini-Web2API](https://github.com/Mag1cFall/Gemini-Web2API)**，遵循 [MIT License](./LICENSE)。
+> 核心协议栈（`gemini.google.com` Bard/StreamGenerate 批量 RPC、Chrome TLS/HTTP2 指纹伪装、Cookie 自动轮换保活、免登录访客会话池、多账号轮询/填充负载均衡与多协议转换）均源自 **[Mag1cFall/Gemini-Web2API](https://github.com/Mag1cFall/Gemini-Web2API)**，遵循 [MIT License](./LICENSE)。
 
 ---
 
 ## 核心特性
 
-- **纯 Go 原生编译 · 零外部运行时依赖**：基于 `bogdanfinn/tls-client` 模拟 Chrome 131 浏览器指纹，直接编译为原生共享库（`.dylib` / `.so` / `.dll`），无需 Python、Node.js、Playwright 或无头浏览器。
+- **纯 Go 原生编译 · 零外部运行时依赖**：基于 `bogdanfinn/tls-client` 模拟现代 Chrome 稳定版 TLS/HTTP2 浏览器指纹，直接编译为原生共享库（`.dylib` / `.so` / `.dll`），无需 Python、Node.js、Playwright 或无头浏览器。
 - **全功能 Google Gemini Web 模型与能力接入**：
   - **核心对话与推理模型**：支持 `gemini-3.8-flash`、`gemini-3.5-flash-lite`、`gemini-4-carbon`、`gemini-4-argon`（含 `-task` 变体与兼容模型映射），支持思维链（Thinking Levels）控制。
   - **专属功能变体与多模态**：支持 `gemini-3.1-flash-image`（绘图生成/编辑）、`gemini-video`（Veo 视频生成）、`gemini-music`（Lyria 音乐）、`gemini-canvas`、`gemini-deep-research`（深度研究）、`gemini-guided-learning` 以及语音 TTS/STT（`/v1/audio/*`）。

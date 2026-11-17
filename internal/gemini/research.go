@@ -119,7 +119,9 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, decode
 	if ctrl, ok := ctx.Value(slotYieldContextKey{}).(SlotYieldController); ok && ctrl != nil {
 		restore, alreadyReleased = ctrl()
 	}
-	if !alreadyReleased {
+	if alreadyReleased {
+		defer restore()
+	} else {
 		c.requestSlot.Release(1)
 		c.busy.Add(-1)
 		c.notifyRelease()
@@ -183,13 +185,20 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, decode
 				break
 			}
 			hash, _ := stringPath(turn, 2, 4)
-			frame := make([]any, 40)
-			frame[1] = []any{session.CID, session.RID}
-			frame[4] = []any{values}
-			frame[39] = hash
 			if decoder == nil {
 				decoder = NewFrameDecoder()
 				decoder.lastSession = state.Snapshot()
+			}
+			modelName := decoder.metadata.ModelName
+			if modelName == "" && model.Variant != "" && bootstrap.Catalog.MatchesBaseOrDefaultHash(model, hash) {
+				modelName = strings.TrimSuffix(model.DisplayName, " Task")
+			}
+			frame := make([]any, 43)
+			frame[1] = []any{session.CID, session.RID}
+			frame[4] = []any{values}
+			frame[39] = hash
+			if modelName != "" {
+				frame[42] = modelName
 			}
 			err := decoder.decodeTurn(frame, state, emit)
 			if researchConfirm != nil {

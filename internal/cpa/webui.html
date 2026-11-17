@@ -489,6 +489,8 @@
         <h1>Gemini-Web2API 插件控制台</h1>
         <span id="stateBadge" class="badge"><span class="status-dot"></span>加载中</span>
         <span id="guestBadge" class="badge accent">访客会话: 检测中</span>
+        <button id="guestRelaunchBtn" class="secondary sm" onclick="relaunchGuestSession()" style="padding:3px 9px; font-size:11px;">重启访客</button>
+        <button id="guestStopBtn" class="secondary sm" onclick="stopGuestSession()" style="padding:3px 9px; font-size:11px;">停止访客</button>
       </div>
       <div class="subtitle">
         Google Gemini Web (gemini.google.com) · Chrome TLS 指纹与 Cookie/OAuth 自动轮换 · 原生支持 OpenAI / Responses / Claude / Gemini / Imagen / Veo
@@ -687,21 +689,22 @@ function getKey() {
   const params = new URLSearchParams(window.location.search);
   const urlKey = params.get('key') || params.get('management_key') || params.get('token');
   if (urlKey && urlKey.trim()) {
-    input.value = urlKey.trim();
-    localStorage.setItem('cpa_gemini_web2api_key', urlKey.trim());
+    const cleanKey = urlKey.trim();
+    input.value = cleanKey;
+    localStorage.setItem('cpa_gemini_web2api_key', cleanKey);
+    params.delete('key');
+    params.delete('management_key');
+    params.delete('token');
+    const cleanQuery = params.toString();
+    window.history.replaceState({}, '', window.location.pathname + (cleanQuery ? ('?' + cleanQuery) : '') + window.location.hash);
     updateKeyBadge();
-    return urlKey.trim();
+    return cleanKey;
   }
   const candidates = ['cpa_gemini_web2api_key', 'cpa_aistudio2api_key', 'management_key', 'cpa-management-key', 'secret-key', 'secretKey', 'managementKey', 'apiKey', 'token'];
   const stores = [localStorage, sessionStorage];
   try {
-    if (window.parent && window.parent !== window && window.parent.localStorage) {
+    if (window.parent && window.parent !== window && window.parent.location.origin === window.location.origin && window.parent.localStorage) {
       stores.push(window.parent.localStorage);
-    }
-  } catch (_) {}
-  try {
-    if (window.opener && window.opener.localStorage) {
-      stores.push(window.opener.localStorage);
     }
   } catch (_) {}
   for (const store of stores) {
@@ -1108,6 +1111,29 @@ async function stopService() {
   }
 }
 
+async function relaunchGuestSession() {
+  try {
+    showToast('正在初始化/重启访客会话...', false);
+    await apiCall('/v0/management/gemini-web2api/guest/relaunch', 'POST', {});
+    showToast('访客会话已重建', false);
+    await loadStatus();
+    loadLogs();
+  } catch (e) {
+    showToast('重启访客失败: ' + e.message, true);
+  }
+}
+
+async function stopGuestSession() {
+  try {
+    await apiCall('/v0/management/gemini-web2api/guest/stop', 'POST', {});
+    showToast('访客会话已停止', false);
+    await loadStatus();
+    loadLogs();
+  } catch (e) {
+    showToast('停止访客失败: ' + e.message, true);
+  }
+}
+
 async function loginWithChromeBrowser() {
   const btn = document.getElementById('chromeLoginBtn');
   const proxyInput = document.getElementById('chromeLoginProxy');
@@ -1266,10 +1292,20 @@ async function loadLogs() {
 }
 
 function escapeHtml(s) {
-  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 function escapeJs(s) {
-  return String(s || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+  return String(s || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '\\x22')
+    .replace(/&/g, '\\x26')
+    .replace(/</g, '\\x3c')
+    .replace(/>/g, '\\x3e')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
 }
 
 getKey();

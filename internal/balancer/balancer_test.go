@@ -39,3 +39,31 @@ func TestNextForPinnedPreservesSessionBinding(t *testing.T) {
 		t.Fatalf("rebuilt session: got (%p, %q), want (%p, accB)", gotClient, gotID, clientB)
 	}
 }
+
+func TestLookupAccountAndLeaveQueueBoundsSafety(t *testing.T) {
+	pool := NewAccountPool(time.Minute, 10*time.Minute)
+	pool.Register("User@Example.com", AccountInfo{}, false)
+
+	id, state, enabled, ok := pool.LookupAccount("user@example.com")
+	if !ok || id != "User@Example.com" || state != StateInitializing || !enabled {
+		t.Fatalf("unexpected LookupAccount result: id=%q state=%q enabled=%v ok=%v", id, state, enabled, ok)
+	}
+
+	// Re-registering as disabled must notify waiters and report enabled=false.
+	prevChanged := pool.changed
+	pool.Register("User@Example.com", AccountInfo{}, true)
+	select {
+	case <-prevChanged:
+	default:
+		t.Fatalf("expected Register state update to close changed notification channel")
+	}
+	_, state, enabled, ok = pool.LookupAccount("user@example.com")
+	if !ok || state != StateDisabled || enabled {
+		t.Fatalf("expected disabled state after re-register, got state=%q enabled=%v ok=%v", state, enabled, ok)
+	}
+
+	// Calling leaveQueue for an already-removed wake channel must not panic.
+	key, wake := pool.joinQueue("", "", "gemini-4-carbon", nil)
+	pool.leaveQueue(key, wake)
+	pool.leaveQueue(key, wake)
+}

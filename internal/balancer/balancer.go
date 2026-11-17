@@ -313,6 +313,8 @@ func (p *AccountPool) Register(accountID string, info AccountInfo, disabled bool
 	}
 	if entry := p.entry(accountID); entry != nil {
 		entry.Info, entry.State = info, state
+		p.sortLocked()
+		p.notifyLocked()
 		return
 	}
 	p.entries = append(p.entries, &accountEntry{AccountID: accountID, Info: info, State: state, ModelCooldowns: make(map[string]cooldown), registered: p.registered})
@@ -543,6 +545,9 @@ func (p *AccountPool) leaveQueue(key string, wake chan struct{}) {
 	defer p.mu.Unlock()
 	waiters := p.queues[key]
 	index := slices.Index(waiters, wake)
+	if index < 0 {
+		return
+	}
 	waiters = slices.Delete(waiters, index, index+1)
 	if len(waiters) == 0 {
 		delete(p.queues, key)
@@ -1165,6 +1170,22 @@ func (p *AccountPool) entry(accountID string) *accountEntry {
 		}
 	}
 	return nil
+}
+
+// LookupAccount 零分配查找池中账号的规范 ID、状态与启用标记
+func (p *AccountPool) LookupAccount(accountID string) (id string, state string, enabled bool, ok bool) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return "", "", false, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, entry := range p.entries {
+		if entry.AccountID == accountID || strings.EqualFold(entry.AccountID, accountID) {
+			return entry.AccountID, entry.State, entry.State != StateDisabled, true
+		}
+	}
+	return "", "", false, false
 }
 
 func (p *AccountPool) cleanupSessions(now time.Time) {

@@ -87,8 +87,7 @@ jobs:
         run: |
           export CGO_ENABLED=1
           go vet ./...
-          go test ./internal/cpa ./internal/proxydial
-
+          go test ./...
       - name: Build Dynamic Library & Package Zip
         shell: bash
         run: |

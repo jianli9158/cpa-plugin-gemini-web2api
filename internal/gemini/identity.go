@@ -2,9 +2,13 @@ package gemini
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math/bits"
+	"net"
+	"net/netip"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	http "github.com/bogdanfinn/fhttp"
@@ -53,6 +57,57 @@ func NewHTTPClient(timeoutSeconds int, proxyURL string) (tls_client.HttpClient, 
 	}
 	if strings.TrimSpace(proxyURL) != "" {
 		options = append(options, tls_client.WithProxyUrl(strings.TrimSpace(proxyURL)))
+	}
+	return tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
+}
+
+var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
+
+// IsDisallowedRemoteIP 报告远端媒体目标地址是否属于本机、私网、CGNAT、链路本地、组播或未指定地址
+func IsDisallowedRemoteIP(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	return !ip.IsValid() ||
+		ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified() ||
+		cgnatPrefix.Contains(ip)
+}
+
+func blockNonPublicRemoteAddress(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid remote media dial address %q: %w", address, err)
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return fmt.Errorf("invalid remote media dial IP %q: %w", host, err)
+	}
+	if IsDisallowedRemoteIP(ip) {
+		return fmt.Errorf("remote media dial blocked non-public IP %s", ip)
+	}
+	return nil
+}
+
+// NewMediaHTTPClient 创建下载外部远程媒体专用的客户端；直连时在 socket connect 前拦截非公网 IP，消除 DNS Rebinding
+func NewMediaHTTPClient(timeoutSeconds int, proxyURL string) (tls_client.HttpClient, error) {
+	options := []tls_client.HttpClientOption{
+		tls_client.WithTimeoutSeconds(timeoutSeconds),
+		tls_client.WithClientProfile(profiles.Chrome_152),
+		tls_client.WithNotFollowRedirects(),
+		tls_client.WithCookieJar(newCookieJar()),
+	}
+	trimmedProxy := strings.TrimSpace(proxyURL)
+	if trimmedProxy != "" {
+		options = append(options, tls_client.WithProxyUrl(trimmedProxy))
+	} else {
+		options = append(options, tls_client.WithDialer(net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+			Control:   blockNonPublicRemoteAddress,
+		}))
 	}
 	return tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
 }

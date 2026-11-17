@@ -7,15 +7,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Mag1cFall/Gemini-Web2API/internal/app"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	PluginID      = "gemini-web2api"
-	PluginVersion = "1.0.6"
-	ProviderID    = "gemini-web2api"
+	PluginID   = "gemini-web2api"
+	ProviderID = "gemini-web2api"
 )
+
+var PluginVersion = app.Version()
 
 // PluginConfig defines the YAML/JSON configuration under plugins.configs.gemini-web2api in CLIProxyAPI's config.yaml.
 type PluginConfig struct {
@@ -251,9 +253,7 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 	}
 
 	cfg := config.Config{
-		ListenAddress:         "127.0.0.1:0",
 		AuthStatePaths:        []string{accountsDir},
-		ProxyAPIKey:           "",
 		ProxyURL:              proxyURL,
 		AccountCooldown:       accountCooldown,
 		SessionTTL:            sessionTTL,
@@ -272,10 +272,7 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 		LogMaxTotalMB:         logMaxMB,
 		PerAccountConcurrency: concurrency,
 		RoutingStrategy:       routingStrategy,
-		AdminAuthEnabled:      false,
-		AdminUsername:         "admin",
 	}
-
 	pcfg.DataDir = dataDir
 	pcfg.AccountsDir = accountsDir
 	pcfg.ModelPrefix = strings.TrimSpace(pcfg.ModelPrefix)

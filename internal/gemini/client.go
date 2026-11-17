@@ -163,9 +163,9 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP client: %w", err)
 	}
-	mediaClient, err := NewHTTPClient(requestCeilingSeconds, proxyURL)
+	mediaClient, err := NewMediaHTTPClient(requestCeilingSeconds, proxyURL)
 	if err != nil {
-		return nil, fmt.Errorf("create HTTP client: %w", err)
+		return nil, fmt.Errorf("create media HTTP client: %w", err)
 	}
 	clientID, err := newProtocolID()
 	if err != nil {
@@ -394,7 +394,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	}
 	if uploads > 0 {
 		trace.SetStage("接受上传条款")
-		if err := c.acceptUploadTerms(ctx, bootstrap, model, request.ThinkingLevel); err != nil {
+		if err := c.acceptUploadTerms(ctx, &bootstrap, model, request.ThinkingLevel); err != nil {
 			return uploadFailed(err)
 		}
 		trace.SetStage("上传附件")
@@ -530,7 +530,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 		*request.researchPlan = decoder.researchConfirm
 	}
 	if err == nil && decoder.background && !request.researchConfirm {
-		err = c.awaitTurn(ctx, decodeState, nil, model, request.ThinkingLevel, nil, request.researchPlan, guard.Emit)
+		err = c.awaitTurn(ctx, decodeState, decoder, model, request.ThinkingLevel, nil, request.researchPlan, guard.Emit)
 	}
 	if snapshot := decodeState.Snapshot(); streamInterrupted(err) && !temporaryChat && !c.guest && !request.researchConfirm && snapshot.CID != "" && snapshot.RID != next.RID {
 		trace.Stage("生成流中断，读取会话取回回答", "原因", err)

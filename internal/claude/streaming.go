@@ -360,8 +360,8 @@ func (p *StreamProcessor) emit(eventType string, payload interface{}) error {
 
 func mapFinishReason(reason gemini.FinishReason) string {
 	switch reason {
-	case gemini.FinishCancelled, gemini.FinishError:
-		return "stop_sequence"
+	case gemini.FinishError:
+		return "refusal"
 	default:
 		return "end_turn"
 	}

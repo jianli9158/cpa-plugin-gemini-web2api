@@ -55,7 +55,7 @@ var processFileHeaderOrder = []string{
 }
 
 // acceptUploadTerms 在账号的上传条款确认超过官网有效期时，按官网同意按钮把确认时间写入账号偏好
-func (c *Client) acceptUploadTerms(ctx context.Context, bootstrap Bootstrap, model Model, level ThinkingLevel) error {
+func (c *Client) acceptUploadTerms(ctx context.Context, bootstrap *Bootstrap, model Model, level ThinkingLevel) error {
 	acceptedAt, _ := bootstrap.Preferences.Field(preferenceUploadTerms).(float64)
 	now := time.Now()
 	if bootstrap.UploadTermsWindow == 0 || time.Unix(int64(acceptedAt), 0).Add(bootstrap.UploadTermsWindow).After(now) {
@@ -67,11 +67,13 @@ func (c *Client) acceptUploadTerms(ctx context.Context, bootstrap Bootstrap, mod
 	if err != nil {
 		return err
 	}
-	if _, err := c.batchExecute(ctx, bootstrap, batchRequest{
+	if _, err := c.batchExecute(ctx, *bootstrap, batchRequest{
 		rpcID: "L5adhe", payload: string(request), sourcePath: "/app", language: bootstrap.Language, extension: "[0]", mode: model.Mode, variant: model.Variant, level: level,
 	}); err != nil {
 		return err
 	}
+	updatedPrefs := bootstrap.Preferences.with(preferenceUploadTerms, float64(now.Unix()))
+	bootstrap.Preferences = updatedPrefs
 	c.bootstrapMu.Lock()
 	if c.bootstrap != nil {
 		c.bootstrap.Preferences = c.bootstrap.Preferences.with(preferenceUploadTerms, float64(now.Unix()))

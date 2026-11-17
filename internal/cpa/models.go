@@ -114,7 +114,7 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 		}
 	}
 
-	if p.hasReadyAccount() && p.isKnownModel(model) {
+	if boolOrDefault(p.Config().RouteUnprefixedModels, true) && p.hasReadyAccount() && p.isKnownModel(model) {
 		hasBuiltinGemini := false
 		for _, prov := range req.AvailableProviders {
 			pLower := strings.ToLower(strings.TrimSpace(prov))

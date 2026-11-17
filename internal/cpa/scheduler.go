@@ -8,6 +8,7 @@ import (
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/pluginabi"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/pluginapi"
 )
 
@@ -365,6 +366,12 @@ func (p *Plugin) handleQuotaReset(raw []byte) (any, error) {
 				Message: err.Error(),
 			}, nil
 		}
+		if st := findPoolAccountStatus(rt, accID); st != nil {
+			for _, mc := range st.ModelCooldowns {
+				_ = rt.Pool.ClearCooldown(accID, mc.Model)
+			}
+		}
+		p.notifyHostCooldownReset(req.HostCallbackID, req.AuthID, accID, "")
 		return pluginapi.QuotaResetResponse{
 			Success: true,
 			Message: "Cleared Gemini Web cooldowns for account " + accID,
@@ -376,9 +383,27 @@ func (p *Plugin) handleQuotaReset(raw []byte) (any, error) {
 		for _, mc := range st.ModelCooldowns {
 			_ = rt.Pool.ClearCooldown(st.AccountID, mc.Model)
 		}
+		p.notifyHostCooldownReset(req.HostCallbackID, "", st.AccountID, "")
 	}
 	return pluginapi.QuotaResetResponse{
 		Success: true,
 		Message: "Cleared Gemini Web cooldowns for all accounts",
 	}, nil
+}
+
+func (p *Plugin) notifyHostCooldownReset(callbackID, authID, accountID, model string) {
+	cleanAcc := strings.ToLower(strings.TrimSpace(accountID))
+	if authID == "" && cleanAcc != "" {
+		authID = fmt.Sprintf("gemini-web2api-%s.json", sanitizeFileComponent(cleanAcc))
+	}
+	req := map[string]any{
+		"host_callback_id": strings.TrimSpace(callbackID),
+		"provider":         ProviderID,
+		"auth_id":          authID,
+		"account_id":       cleanAcc,
+	}
+	if m := strings.TrimSpace(model); m != "" && m != "*" {
+		req["model"] = m
+	}
+	_, _ = p.callHost(pluginabi.MethodHostRoutingResetCooldown, req)
 }

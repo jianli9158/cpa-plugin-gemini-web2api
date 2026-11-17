@@ -40,10 +40,7 @@ func (c *Client) FetchUsage(ctx context.Context) (UsageInfo, error) {
 	if err != nil {
 		return UsageInfo{}, err
 	}
-	contextWindow, err := usageContextWindow(usage.Tier)
-	if err != nil {
-		return UsageInfo{}, err
-	}
+	contextWindow := usageContextWindow(usage.Tier, int(c.contextSize.Load()))
 	c.contextSize.Store(int64(contextWindow))
 	c.usage.Store(&usage)
 	return usage, nil
@@ -237,16 +234,19 @@ func usageTier(code int) string {
 	}
 }
 
-func usageContextWindow(tier string) (int, error) {
+func usageContextWindow(tier string, current int) int {
 	switch tier {
 	case "free":
-		return 32 * 1024, nil
+		return 32 * 1024
 	case "plus":
-		return 128 * 1024, nil
+		return 128 * 1024
 	case "pro", "ultra":
-		return 1024 * 1024, nil
+		return 1024 * 1024
 	default:
-		return 0, fmt.Errorf("unknown Gemini Web tier %q", tier)
+		if current > 0 {
+			return current
+		}
+		return 128 * 1024
 	}
 }
 

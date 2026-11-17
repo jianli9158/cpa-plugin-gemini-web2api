@@ -27,6 +27,12 @@ func renderWidgets(candidate []any, raw string) string {
 	if !strings.Contains(raw, "<") {
 		return raw
 	}
+	if !strings.Contains(raw, "<Sequence") && !strings.Contains(raw, "<TemplateWidget") && !strings.Contains(raw, "<Carousel") {
+		lastNL := strings.LastIndexByte(raw, '\n')
+		if !widgetPrefix(strings.TrimSpace(raw[lastNL+1:])) {
+			return raw
+		}
+	}
 	lines := strings.Split(raw, "\n")
 	var output []string
 	fence := ""

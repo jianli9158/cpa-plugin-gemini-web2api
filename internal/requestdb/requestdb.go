@@ -285,9 +285,22 @@ func (store *Store) flush() {
 		return
 	}
 	flushed := make(chan struct{})
-	store.writes <- write{flushed: flushed}
-	store.mu.RUnlock()
-	<-flushed
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	select {
+	case store.writes <- write{flushed: flushed}:
+		store.mu.RUnlock()
+	case <-store.done:
+		store.mu.RUnlock()
+		return
+	case <-timer.C:
+		store.mu.RUnlock()
+		return
+	}
+	select {
+	case <-flushed:
+	case <-store.done:
+	}
 }
 
 // commit 写入一批记录，记录写入失败与队列丢弃

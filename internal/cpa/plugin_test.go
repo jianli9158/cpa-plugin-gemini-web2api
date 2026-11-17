@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
-
 	"github.com/Mag1cFall/Gemini-Web2API/internal/cpa"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/pluginabi"
@@ -28,7 +28,7 @@ func TestPluginLifecycleAndCapabilities(t *testing.T) {
 		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, nil)
 	}()
 
-	cfgYAML := []byte("data_dir: " + tmpDir + "\nauto_start: false\n")
+	cfgYAML := []byte("data_dir: " + filepath.ToSlash(tmpDir) + "\nauto_start: false\n")
 	regReq, _ := json.Marshal(map[string]any{
 		"config_yaml":    cfgYAML,
 		"schema_version": pluginabi.SchemaVersion,
@@ -249,11 +249,12 @@ func TestPluginLifecycleAndCapabilities(t *testing.T) {
 func TestAuthFileDisabledSyncOnServiceStopAndShutdown(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome)
 	authDir := filepath.Join(tmpHome, ".cli-proxy-api")
 	if err := os.MkdirAll(authDir, 0o700); err != nil {
 		t.Fatalf("mkdir authDir: %v", err)
 	}
-	dataDir := filepath.Join(tmpHome, ".gemini-web2api")
+	dataDir := filepath.ToSlash(filepath.Join(tmpHome, ".gemini-web2api"))
 	authFilePath := filepath.Join(authDir, "gemini-web2api-testuser@gmail.com.json")
 	initialPayload := `{
 		"type": "gemini-web2api",
@@ -361,7 +362,7 @@ func TestPluginReloadAndSchedulerFiltering(t *testing.T) {
 		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, []byte(`{}`))
 	}()
 
-	cfg1 := []byte("data_dir: " + tmpDir + "\nauto_start: false\nguest_enabled: false\nrouting_strategy: fill-first\naccount_order: acc2@example.com,acc1@example.com\nmodel_accounts: gemini-4-carbon:acc1@example.com\nfirst_event_hedge: 15s\nfirst_event_hedge_models: gemini-4-carbon,gemini-4-argon\n")
+	cfg1 := []byte("data_dir: " + filepath.ToSlash(tmpDir) + "\nauto_start: false\nguest_enabled: false\nrouting_strategy: fill-first\naccount_order: acc2@example.com,acc1@example.com\nmodel_accounts: gemini-4-carbon:acc1@example.com\nfirst_event_hedge: 15s\nfirst_event_hedge_models: gemini-4-carbon,gemini-4-argon\n")
 	regReq, _ := json.Marshal(map[string]any{
 		"config_yaml":    cfg1,
 		"schema_version": pluginabi.SchemaVersion,
@@ -435,7 +436,7 @@ func TestPluginReloadAndSchedulerFiltering(t *testing.T) {
 	}
 
 	// Reconfigure live via plugin.reconfigure (ApplyConfig path) and verify updated bindings + round-robin take effect.
-	cfg2 := []byte("data_dir: " + tmpDir + "\nauto_start: false\nguest_enabled: false\nrouting_strategy: round-robin\naccount_order: acc1@example.com,acc2@example.com\nmodel_accounts: gemini-4-carbon:acc2@example.com\nfirst_event_hedge: off\n")
+	cfg2 := []byte("data_dir: " + filepath.ToSlash(tmpDir) + "\nauto_start: false\nguest_enabled: false\nrouting_strategy: round-robin\naccount_order: acc1@example.com,acc2@example.com\nmodel_accounts: gemini-4-carbon:acc2@example.com\nfirst_event_hedge: off\n")
 	reconfReq, _ := json.Marshal(map[string]any{
 		"config_yaml":    cfg2,
 		"schema_version": pluginabi.SchemaVersion,
@@ -461,13 +462,120 @@ func TestPluginReloadAndSchedulerFiltering(t *testing.T) {
 	}
 }
 
-func TestBuiltDynamicLibraryExists(t *testing.T) {
-	dylibPath := filepath.Join("..", "..", "dist", "plugins", "darwin", "arm64", "gemini-web2api.dylib")
-	info, err := os.Stat(dylibPath)
+func TestRouteUnprefixedModelsAndHostCallbacks(t *testing.T) {
+	tmpDir := t.TempDir()
+	var hostMethods []string
+	p := cpa.NewPlugin(func(method string, payload []byte) ([]byte, error) {
+		hostMethods = append(hostMethods, method)
+		return json.Marshal(pluginabi.Envelope{OK: true, Result: json.RawMessage(`{}`)})
+	})
+	defer func() {
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, []byte(`{}`))
+	}()
+
+	cfg := []byte("data_dir: " + filepath.ToSlash(tmpDir) + "\nauto_start: false\nguest_enabled: false\nroute_unprefixed_models: false\nsync_auth_files: true\n")
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    cfg,
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq); err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+
+	rt, err := p.Runtime()
 	if err != nil {
-		t.Skipf("dylib not found at %s: %v", dylibPath, err)
+		t.Fatalf("Runtime() failed: %v", err)
+	}
+	client, err := gemini.NewClient(gemini.AccountSource{ID: "acc1@example.com", Concurrency: 1}, "", false)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	rt.Pool.Add(client, "acc1@example.com")
+
+	// With route_unprefixed_models: false, unprefixed model must NOT be claimed, while prefixed model MUST be routed.
+	unprefixedReq, _ := json.Marshal(pluginapi.ModelRouteRequest{
+		RequestedModel: "gemini-4-carbon",
+	})
+	unprefixedRes, err := p.HandleMethod(pluginabi.MethodModelRoute, unprefixedReq)
+	if err != nil {
+		t.Fatalf("model.route unprefixed failed: %v", err)
+	}
+	if unprefixedRes.(pluginapi.ModelRouteResponse).Handled {
+		t.Fatalf("expected Handled=false when route_unprefixed_models is false")
+	}
+
+	prefixedReq, _ := json.Marshal(pluginapi.ModelRouteRequest{
+		RequestedModel: "gemini-web/gemini-4-carbon",
+	})
+	prefixedRes, err := p.HandleMethod(pluginabi.MethodModelRoute, prefixedReq)
+	if err != nil {
+		t.Fatalf("model.route prefixed failed: %v", err)
+	}
+	if !prefixedRes.(pluginapi.ModelRouteResponse).Handled {
+		t.Fatalf("expected Handled=true for gemini-web/ prefix even when route_unprefixed_models is false")
+	}
+
+	// SyncAccountIDToHostAuth without callbackID must still invoke host.auth.save over ABI.
+	hostMethods = nil
+	if err := p.SyncAccountIDToHostAuth("", "acc1@example.com"); err != nil {
+		t.Fatalf("SyncAccountIDToHostAuth failed: %v", err)
+	}
+	foundSave := false
+	for _, m := range hostMethods {
+		if m == pluginabi.MethodHostAuthSave {
+			foundSave = true
+		}
+	}
+	if !foundSave {
+		t.Fatalf("expected %s host call, got %v", pluginabi.MethodHostAuthSave, hostMethods)
+	}
+
+	// Quota reset must also notify host.routing.reset_cooldown.
+	hostMethods = nil
+	resetReq, _ := json.Marshal(pluginapi.QuotaResetRequest{
+		Attributes: map[string]string{"account_id": "acc1@example.com"},
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodQuotaReset, resetReq); err != nil {
+		t.Fatalf("quota.reset failed: %v", err)
+	}
+	foundCooldownReset := false
+	for _, m := range hostMethods {
+		if m == pluginabi.MethodHostRoutingResetCooldown {
+			foundCooldownReset = true
+		}
+	}
+	if !foundCooldownReset {
+		t.Fatalf("expected %s host call on quota.reset, got %v", pluginabi.MethodHostRoutingResetCooldown, hostMethods)
+	}
+
+	// Guest stop management endpoint must succeed and return status JSON.
+	guestStopReq, _ := json.Marshal(pluginapi.ManagementRequest{
+		Method: http.MethodPost,
+		Path:   "/v0/management/gemini-web2api/guest/stop",
+	})
+	guestStopRes, err := p.HandleMethod(pluginabi.MethodManagementHandle, guestStopReq)
+	if err != nil {
+		t.Fatalf("guest/stop failed: %v", err)
+	}
+	if guestStopRes.(pluginapi.ManagementResponse).StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from guest/stop, got %d", guestStopRes.(pluginapi.ManagementResponse).StatusCode)
+	}
+}
+
+func TestBuiltDynamicLibraryExists(t *testing.T) {
+	ext := ".so"
+	switch runtime.GOOS {
+	case "darwin":
+		ext = ".dylib"
+	case "windows":
+		ext = ".dll"
+	}
+	libPath := filepath.Join("..", "..", "dist", "plugins", runtime.GOOS, runtime.GOARCH, "gemini-web2api"+ext)
+	info, err := os.Stat(libPath)
+	if err != nil {
+		t.Skipf("shared library not found at %s: %v", libPath, err)
 	}
 	if info.Size() < 1*1024*1024 {
-		t.Fatalf("expected built dylib > 1MB, got %d bytes", info.Size())
+		t.Fatalf("expected built shared library > 1MB, got %d bytes", info.Size())
 	}
 }

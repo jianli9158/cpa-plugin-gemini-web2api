@@ -12,13 +12,13 @@
 
 > **Upstream Attribution & Acknowledgements**  
 > This repository is a native **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** dynamic-library plugin port (C ABI v1 / Schema v10) of **[Mag1cFall/Gemini-Web2API](https://github.com/Mag1cFall/Gemini-Web2API)**.  
-> The core Google Gemini Web protocol stack (`gemini.google.com` Bard/StreamGenerate batch RPC, Chrome 131 TLS/HTTP2 fingerprint emulation, automatic Cookie rotation, keyless Guest sessions, multi-account load balancing, and multi-protocol translation) originates from **[Mag1cFall/Gemini-Web2API](https://github.com/Mag1cFall/Gemini-Web2API)** under the [MIT License](./LICENSE).
+> The core Google Gemini Web protocol stack (`gemini.google.com` Bard/StreamGenerate batch RPC, Chrome TLS/HTTP2 fingerprint emulation, automatic Cookie rotation, keyless Guest sessions, multi-account load balancing, and multi-protocol translation) originates from **[Mag1cFall/Gemini-Web2API](https://github.com/Mag1cFall/Gemini-Web2API)** under the [MIT License](./LICENSE).
 
 ---
 
 ## Key Features
 
-- **Pure Go Native Shared Library · Zero External Runtime Dependencies**: Uses `bogdanfinn/tls-client` to emulate Chrome 131 TLS/HTTP2 fingerprints directly inside the compiled shared library (`.dylib` / `.so` / `.dll`)—no Python, Node.js, Playwright, or headless browser required.
+- **Pure Go Native Shared Library · Zero External Runtime Dependencies**: Uses `bogdanfinn/tls-client` to emulate modern Chrome stable TLS/HTTP2 fingerprints directly inside the compiled shared library (`.dylib` / `.so` / `.dll`)—no Python, Node.js, Playwright, or headless browser required.
 - **Full Google Gemini Web Model & Feature Coverage**:
   - **Core Chat & Reasoning Models**: `gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-4-carbon`, `gemini-4-argon` (plus `-task` variants and custom model mappings), with Thinking Level controls.
   - **Feature Variants & Multimodal**: `gemini-3.1-flash-image` (image generation & editing), `gemini-video` (Veo video generation), `gemini-music` (Lyria music), `gemini-canvas`, `gemini-deep-research`, `gemini-guided-learning`, and audio TTS/STT (`/v1/audio/*`).

@@ -1,3 +1,4 @@
+// Package tokencount 使用内嵌的 Gemma 3 SentencePiece 模型计算可见文本的 token 数。
 package tokencount
 
 import (
@@ -8,7 +9,7 @@ import (
 	"hash/maphash"
 	"strings"
 	"sync"
-
+	"unicode/utf8"
 	sentencepiece "github.com/eliben/go-sentencepiece"
 )
 
@@ -33,6 +34,8 @@ func loadProcessor() *sentencepiece.Processor {
 const (
 	// chunkBytes 是分段计数的目标字节数
 	chunkBytes = 4096
+	// maxChunkBytes 是无换行超长文本的单段硬上限，防止单行 JSON/Base64 退化为整段编码
+	maxChunkBytes = 16384
 	// chunkLimit 是记忆的分段数量上限，达到时清空
 	chunkLimit = 1 << 16
 )
@@ -63,10 +66,21 @@ func chunkEnd(value string) int {
 	if newline := strings.LastIndexByte(value[:chunkBytes], '\n'); newline >= 0 {
 		return newline + 1
 	}
-	if newline := strings.IndexByte(value[chunkBytes:], '\n'); newline >= 0 {
+	searchWindow := value[chunkBytes:]
+	if len(searchWindow) > maxChunkBytes-chunkBytes {
+		searchWindow = searchWindow[:maxChunkBytes-chunkBytes]
+	}
+	if newline := strings.IndexByte(searchWindow, '\n'); newline >= 0 {
 		return chunkBytes + newline + 1
 	}
-	return len(value)
+	if len(value) <= maxChunkBytes {
+		return len(value)
+	}
+	end := maxChunkBytes
+	for end > chunkBytes && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return end
 }
 
 // chunkTokens 返回一段文本的 token 数，相同内容只编码一次

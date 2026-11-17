@@ -37,6 +37,9 @@ func historyKeys(system string, bridge ToolBridge, turns []historyTurn, replies 
 	if bridge.disallowsHostedTools() {
 		tools = nil
 	}
+	if turns == nil {
+		turns = []historyTurn{}
+	}
 	data, _ := json.Marshal(struct {
 		System string           `json:"s"`
 		Tools  []ToolDefinition `json:"d,omitempty"`
@@ -61,7 +64,7 @@ func historyKeys(system string, bridge ToolBridge, turns []historyTurn, replies 
 
 // continuedHistoryKey 返回请求历史到最后一个 assistant 轮为止的会话键，该键已登记到网页会话时可按增量续接，否则返回空
 func continuedHistoryKey(system string, bridge ToolBridge, turns []historyTurn) string {
-	for index := len(turns) - 1; index > 0; index-- {
+	for index := len(turns) - 2; index > 0; index-- {
 		if turns[index].Role != "assistant" {
 			continue
 		}
