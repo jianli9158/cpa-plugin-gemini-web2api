@@ -53,8 +53,8 @@ func TestPluginLifecycleAndCapabilities(t *testing.T) {
 		t.Fatalf("auth.identifier failed: %v", err)
 	}
 	authIDJSON, _ := json.Marshal(authIDRes)
-	if !strings.Contains(string(authIDJSON), `"gemini-web2api"`) {
-		t.Fatalf("unexpected auth.identifier: %s", string(authIDJSON))
+	if !strings.Contains(string(authIDJSON), `"identifiers":["gemini-web2api"]`) {
+		t.Fatalf("expected single auth identifier to avoid duplicate OAuth cards, got: %s", string(authIDJSON))
 	}
 
 	// Unrelated provider should return Handled: false

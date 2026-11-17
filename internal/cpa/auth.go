@@ -73,7 +73,7 @@ func isGeminiWebProvider(provider string) bool {
 func (p *Plugin) handleAuthIdentifier() (any, error) {
 	return rpcIdentifierResponse{
 		Identifier:          ProviderID,
-		Identifiers:         []string{"gemini-web2api", "gemini-web", "geminiweb2api"},
+		Identifiers:         []string{ProviderID},
 		CredentialProviders: []string{"gemini-web2api", "gemini-web", "geminiweb2api"},
 	}, nil
 }
