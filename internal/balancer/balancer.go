@@ -490,6 +490,20 @@ func (p *AccountPool) nextForPinned(pinnedID string, sessionKey string, modelID 
 	p.mu.Lock()
 	now := time.Now()
 	p.cleanupSessions(now)
+	if sessionKey != "" {
+		if binding, ok := p.sessions[sessionKey]; ok && now.Before(binding.ExpiresAt) {
+			entry := p.entry(binding.AccountID)
+			_, excluded := excludedAccountIDs[binding.AccountID]
+			if entry != nil && !excluded && entry.schedulable(now, modelID) {
+				entry.LastUsed = now
+				p.sessions[sessionKey] = sessionBinding{AccountID: entry.AccountID, ExpiresAt: now.Add(p.sessionTTL)}
+				p.mu.Unlock()
+				return entry.Client, entry.AccountID
+			}
+			p.mu.Unlock()
+			return nil, binding.AccountID
+		}
+	}
 	if _, excluded := excludedAccountIDs[pinnedID]; !excluded {
 		if entry := p.entry(pinnedID); entry != nil && entry.schedulable(now, modelID) {
 			entry.LastUsed = now
@@ -508,11 +522,14 @@ func (p *AccountPool) nextForPinned(pinnedID string, sessionKey string, modelID 
 func (p *AccountPool) joinQueue(pinnedID string, sessionKey string, modelID string, excludedAccountIDs map[string]struct{}) (string, chan struct{}) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	bound := pinnedID
-	if bound == "" {
-		if binding, ok := p.sessions[sessionKey]; ok && sessionKey != "" && time.Now().Before(binding.ExpiresAt) {
+	bound := ""
+	if sessionKey != "" {
+		if binding, ok := p.sessions[sessionKey]; ok && time.Now().Before(binding.ExpiresAt) {
 			bound = binding.AccountID
 		}
+	}
+	if bound == "" {
+		bound = pinnedID
 	}
 	key := modelID + "\x00" + bound + "\x00" + strings.Join(slices.Sorted(maps.Keys(excludedAccountIDs)), ",")
 	wake := make(chan struct{}, 1)

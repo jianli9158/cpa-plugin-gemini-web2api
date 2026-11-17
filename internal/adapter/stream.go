@@ -49,6 +49,13 @@ type accountContextError struct {
 func (e *accountContextError) Error() string { return e.err.Error() }
 func (e *accountContextError) Unwrap() error { return e.err }
 
+type sessionAccountChangedError struct {
+	err *gemini.ProtocolError
+}
+
+func (e *sessionAccountChangedError) Error() string { return e.err.Error() }
+func (e *sessionAccountChangedError) Unwrap() error { return e.err }
+
 // outputMismatchError 是回答不符合请求要求的输出形式时的可重试错误，validation 表示结构化输出没有通过解析或校验
 type outputMismatchError struct {
 	err        *gemini.ProtocolError
@@ -525,6 +532,11 @@ func runGenerationAttempts(
 			sessionKey, newSession, requestAttempts = "", true, availableAccounts
 			continue
 		}
+		if isSessionAccountChanged(err) && rebuildable && !newSession && !visibleOutput() {
+			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
+			sessionKey, newSession, requestAttempts = "", true, availableAccounts
+			continue
+		}
 		if errors.Is(err, gemini.ErrGuestAttachments) && !pool.RetryAfter(ctx, requestedModel).IsZero() && (sessionKey == "" || newSession || rebuildable) {
 			retrying := recoverAccounts()
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, retrying)
@@ -642,7 +654,7 @@ func runGenerationWithClient(
 			branch = !conversations.isLatest(conversation.Snapshot())
 		}
 		if boundAccountID != accountID {
-			return generationResult{}, &gemini.ProtocolError{HTTPStatus: 409, Message: "会话绑定账号已变化，请开始新会话"}
+			return generationResult{}, &sessionAccountChangedError{err: &gemini.ProtocolError{HTTPStatus: 409, Message: "会话绑定账号已变化，请开始新会话"}}
 		}
 	}
 	prompt, files, err := prepare(client, continuation)
@@ -881,6 +893,11 @@ func isOutputMismatchError(err error) bool {
 func isAccountContextError(err error) bool {
 	var contextErr *accountContextError
 	return errors.As(err, &contextErr)
+}
+
+func isSessionAccountChanged(err error) bool {
+	var changed *sessionAccountChangedError
+	return errors.As(err, &changed)
 }
 
 // actualProviderModel 返回上游实际回答的模型 ID：变体模型通过核对时取该变体的型号，其余按上游给出的模型名与 hash 在账号目录中查找
