@@ -28,7 +28,7 @@ jobs:
         include:
           - goos: darwin
             goarch: arm64
-            os: macos-15
+            os: macos-15-intel
             ext: .dylib
           - goos: darwin
             goarch: amd64
@@ -82,7 +82,7 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Run Go Vet & Unit Tests (Native Targets)
-        if: (matrix.goos == 'darwin' && matrix.goarch == 'arm64') || (matrix.goos == 'linux' && matrix.goarch == 'amd64')
+        if: (matrix.goos == 'darwin' && matrix.goarch == 'amd64') || (matrix.goos == 'linux' && matrix.goarch == 'amd64')
         shell: bash
         run: |
           export CGO_ENABLED=1

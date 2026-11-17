@@ -20,7 +20,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             ext: .so
-          - os: macos-15
+          - os: macos-15-intel
             ext: .dylib
           - os: windows-latest
             ext: .dll
