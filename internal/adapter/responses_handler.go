@@ -38,6 +38,7 @@ type ResponsesTool struct {
 	Quality           string          `json:"quality,omitempty"`
 	Size              string          `json:"size,omitempty"`
 	Format            json.RawMessage `json:"format,omitempty"`
+	Execution         string          `json:"execution,omitempty"`
 	Tools             []ResponsesTool `json:"tools,omitempty"`
 }
 
@@ -306,12 +307,13 @@ func responsesMessages(raw json.RawMessage, definitions []ToolDefinition) ([]Cha
 			Output    json.RawMessage `json:"output"`
 			Name      string          `json:"name"`
 			Namespace string          `json:"namespace"`
-			Arguments string          `json:"arguments"`
+			Arguments json.RawMessage `json:"arguments"`
 			Result    string          `json:"result"`
 			Input     string          `json:"input"`
 			Action    json.RawMessage `json:"action"`
 			Operation json.RawMessage `json:"operation"`
 			Status    string          `json:"status"`
+			Tools     json.RawMessage `json:"tools"`
 		}
 		if err := json.Unmarshal(item, &envelope); err != nil {
 			return nil, err
@@ -322,7 +324,7 @@ func responsesMessages(raw json.RawMessage, definitions []ToolDefinition) ([]Cha
 		case "function_call_output":
 			messages = append(messages, ChatMessage{Role: "tool", Content: envelope.Output, ToolCallID: envelope.CallID})
 		case "function_call":
-			arguments := envelope.Arguments
+			arguments := rawStringOrObject(envelope.Arguments)
 			messages = append(messages, ChatMessage{Role: "assistant", ToolCalls: []OpenAIToolCall{responsesPriorToolCall(envelope.CallID, qualified(envelope.Namespace, envelope.Name), arguments)}})
 		case "custom_tool_call", "local_shell_call", "shell_call", "apply_patch_call":
 			name, arguments := responsesClientCall(envelope.Type, envelope.Input, envelope.Action, envelope.Operation)
@@ -334,6 +336,19 @@ func responsesMessages(raw json.RawMessage, definitions []ToolDefinition) ([]Cha
 			output := envelope.Output
 			if envelope.Type == "apply_patch_call_output" {
 				output, _ = json.Marshal(gin.H{"status": envelope.Status, "output": json.RawMessage(rawObject(envelope.Output))})
+			}
+			messages = append(messages, ChatMessage{Role: "tool", Content: toolOutputContent(output), ToolCallID: cmp.Or(envelope.CallID, envelope.ID)})
+		case "tool_search_call":
+			name := cmp.Or(envelope.Name, "tool_search")
+			messages = append(messages, ChatMessage{Role: "assistant", ToolCalls: []OpenAIToolCall{responsesPriorToolCall(cmp.Or(envelope.CallID, envelope.ID), qualified(envelope.Namespace, name), rawStringOrObject(envelope.Arguments))}})
+		case "tool_search_output":
+			output := envelope.Output
+			if len(output) == 0 || string(output) == "null" {
+				if len(envelope.Tools) > 0 && string(envelope.Tools) != "null" {
+					output, _ = json.Marshal(gin.H{"tools": json.RawMessage(envelope.Tools)})
+				} else {
+					output = json.RawMessage(`"{}"`)
+				}
 			}
 			messages = append(messages, ChatMessage{Role: "tool", Content: toolOutputContent(output), ToolCallID: cmp.Or(envelope.CallID, envelope.ID)})
 		case "agent_message":
@@ -428,6 +443,8 @@ func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
 			}
 		case "local_shell", "shell", "apply_patch":
 			bridge.Definitions = append(bridge.Definitions, responsesClientTools[tool.Type])
+		case "tool_search":
+			bridge.Definitions = append(bridge.Definitions, toolSearchDefinition(tool))
 		case "namespace":
 			for _, inner := range tool.Tools {
 				if inner.Type != "function" && inner.Type != "custom" {

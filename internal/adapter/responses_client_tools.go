@@ -1,6 +1,6 @@
 package adapter
-
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -29,6 +29,22 @@ var responsesClientTools = map[string]ToolDefinition{
 		Description: "Creates, updates or deletes a file. diff uses the V4A format: for create_file every line of the new file starts with +; for update_file each hunk starts with @@ and every line starts with a space for context, - for a removed line or + for an added line.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"type":{"type":"string","enum":["create_file","update_file","delete_file"],"description":"The file operation"},"path":{"type":"string","description":"The file path"},"diff":{"type":"string","description":"The V4A diff for create_file and update_file"}},"required":["type","path"]}`),
 	},
+	"tool_search": {
+		Name: "tool_search", Kind: "tool_search",
+		Description: "Searches over deferred tool metadata with BM25 and exposes matching tools for the next model call.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Search query for deferred tools."},"limit":{"type":"number","description":"Maximum number of tools to return. Defaults to 8."}},"required":["query"]}`),
+	},
+}
+
+// toolSearchDefinition 把 Responses tool_search 工具声明为客户端函数，保留请求自带的描述与参数模式
+func toolSearchDefinition(tool ResponsesTool) ToolDefinition {
+	def := responsesClientTools["tool_search"]
+	def.Name = cmp.Or(tool.Name, def.Name)
+	def.Description = cmp.Or(tool.Description, def.Description)
+	if len(tool.Parameters) > 0 && string(tool.Parameters) != "null" {
+		def.Parameters = tool.Parameters
+	}
+	return def
 }
 
 // customToolDefinition 把 custom 工具声明为只接收字符串 input 的函数，语法格式写入描述
@@ -92,6 +108,8 @@ func responsesCallItem(call ToolCall, bridge ToolBridge) gin.H {
 		item["type"], item["action"], item["environment"] = "shell_call", action, nil
 	case "apply_patch":
 		item["type"], item["operation"] = "apply_patch_call", json.RawMessage(call.Arguments)
+	case "tool_search":
+		item["type"], item["execution"], item["arguments"] = "tool_search_call", "client", json.RawMessage(rawObject(call.Arguments))
 	default:
 		item["type"], item["name"], item["arguments"] = "function_call", name, string(call.Arguments)
 	}
@@ -126,6 +144,15 @@ func rawObject(raw json.RawMessage) string {
 		return "{}"
 	}
 	return string(raw)
+}
+
+// rawStringOrObject 把 JSON 字符串解包为文本，对象或数组保留 JSON 原文
+func rawStringOrObject(raw json.RawMessage) string {
+	var text string
+	if len(raw) > 0 && json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	return rawObject(raw)
 }
 
 // toolOutputContent 把工具输出转为工具消息正文，字符串与内容数组原样保留，其他 JSON 值以原文作为字符串

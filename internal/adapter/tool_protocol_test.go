@@ -188,3 +188,43 @@ func TestSplitCallGateWaitsForLineAfterUnclosedBacktick(t *testing.T) {
 		}
 	}
 }
+
+// TestResponsesToolSearch 验证 Responses 的 tool_search 工具声明、tool_search_call 投影与历史消息往返
+func TestResponsesToolSearch(t *testing.T) {
+	req := ResponsesRequest{
+		Tools: []ResponsesTool{{
+			Type:        "tool_search",
+			Execution:   "client",
+			Description: "Search deferred tools",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"number"}},"required":["query"]}`),
+		}},
+	}
+	bridge, err := responsesToolBridge(req)
+	if err != nil {
+		t.Fatalf("responsesToolBridge err: %v", err)
+	}
+	if len(bridge.Definitions) != 1 || bridge.Definitions[0].Name != "tool_search" || bridge.Definitions[0].Kind != "tool_search" {
+		t.Fatalf("unexpected definitions: %+v", bridge.Definitions)
+	}
+	item := responsesCallItem(ToolCall{ID: "call_1", Name: "tool_search", Arguments: json.RawMessage(`{"query":"mcp","limit":5}`)}, bridge)
+	if item["type"] != "tool_search_call" || item["execution"] != "client" {
+		t.Fatalf("unexpected call item: %+v", item)
+	}
+	rawHistory := json.RawMessage(`[
+		{"type":"tool_search_call","call_id":"call_1","execution":"client","arguments":{"query":"mcp","limit":5}},
+		{"type":"tool_search_output","call_id":"call_1","execution":"client","tools":[{"type":"function","name":"mcp_tool"}]}
+	]`)
+	msgs, err := responsesMessages(rawHistory, bridge.Definitions)
+	if err != nil {
+		t.Fatalf("responsesMessages err: %v", err)
+	}
+	if len(msgs) != 2 || len(msgs[0].ToolCalls) != 1 || msgs[0].ToolCalls[0].Function.Name != "tool_search" {
+		t.Fatalf("unexpected messages: %+v", msgs)
+	}
+	if msgs[0].ToolCalls[0].Function.Arguments != `{"query":"mcp","limit":5}` {
+		t.Fatalf("unexpected arguments: %s", msgs[0].ToolCalls[0].Function.Arguments)
+	}
+	if msgs[1].Role != "tool" || msgs[1].ToolCallID != "call_1" {
+		t.Fatalf("unexpected tool output message: %+v", msgs[1])
+	}
+}
