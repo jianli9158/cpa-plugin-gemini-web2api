@@ -12,16 +12,17 @@
 
 > **项目说明与致谢（Upstream Attribution）**  
 > 本项目是将 **[Mag1cFall/Gemini-Web2API](https://github.com/Mag1cFall/Gemini-Web2API)** 完整移植为 **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** 原生动态库插件（Native C ABI v1 / Schema v10）的开源项目。  
-> 核心协议栈（`gemini.google.com` Bard/StreamGenerate 批量 RPC、Chrome 131 TLS/HTTP2 指纹伪装、Cookie 自动轮换保活、免登录访客会话池、多账号轮询/填充负载均衡与多协议转换）均源自 **[Mag1cFall/Gemini-Web2API](https://github.com/Mag1cFall/Gemini-Web2API)**，遵循 [MIT License](./LICENSE)。
+> 核心协议栈（`gemini.google.com` Bard/StreamGenerate 批量 RPC、Chrome 142–157 TLS/HTTP2 指纹伪装、Cookie 自动轮换保活、免登录访客会话池、多账号轮询/填充负载均衡与多协议转换）均源自 **[Mag1cFall/Gemini-Web2API](https://github.com/Mag1cFall/Gemini-Web2API)**，遵循 [MIT License](./LICENSE)。
 
 ---
 
 ## 核心特性
 
-- **纯 Go 原生编译 · 零外部运行时依赖**：基于 `bogdanfinn/tls-client` 模拟 Chrome 131 浏览器指纹，直接编译为原生共享库（`.dylib` / `.so` / `.dll`），无需 Python、Node.js、Playwright 或无头浏览器。
+- **纯 Go 原生编译 · 零外部运行时依赖**：基于 `Mag1cFall/fhttp` 与 `bogdanfinn/tls-client` 按真实市场份额分配并模拟 Chrome 142–157 TLS/HTTP2 指纹（含 `x-sec-ch-ua-not-a-border`、`Sec-CH-UA` 与平台指纹），直接编译为原生共享库（`.dylib` / `.so` / `.dll`），无需 Python、Node.js、Playwright 或无头浏览器。
 - **全功能 Google Gemini Web 模型与能力接入**：
-  - **核心对话与推理模型**：支持 `gemini-3.8-flash`、`gemini-3.5-flash-lite`、`gemini-4-carbon`、`gemini-4-argon`（含 `-task` 变体与兼容模型映射），支持思维链（Thinking Levels）控制。
+  - **核心对话与推理模型**：支持 `gemini-default`、`gemini-3.8-flash`、`gemini-3.5-flash-lite`、`gemini-4-carbon`、`gemini-4-argon`（含自动跟踪官网模型改名、`google/` 与 `models/` 前缀兼容及自定义模型映射），支持思维链（Thinking Levels）控制。
   - **专属功能变体与多模态**：支持 `gemini-3.1-flash-image`（绘图生成/编辑）、`gemini-video`（Veo 视频生成）、`gemini-music`（Lyria 音乐）、`gemini-canvas`、`gemini-deep-research`（深度研究）、`gemini-guided-learning` 以及语音 TTS/STT（`/v1/audio/*`）。
+  - **扩展协议与上下文能力**：支持 Interactions API（`/v1/interactions`、`/v1beta/interactions`）、Gemini Context Caching（`/v1/cachedContents`、`/v1beta/cachedContents`）、OpenAI Responses API 与 MCP 协议端点。
 - **免登录访客会话 + 多源 Google 账号池**：
   - 支持**免登录访客（Guest）会话**开箱即用；
   - 支持**本机 Chrome 独立无痕窗口一键登录**与**Cookie / Playwright StorageState 粘贴导入**；
@@ -50,7 +51,7 @@ flowchart LR
         Router["Model Router & Scheduler"] --> Runtime["Gemini-Web2API PluginRuntime"]
         Runtime --> Pool["Account Pool & Cooldown Store"]
         Runtime --> Mgr["Account Manager (Guest / CookieRotator / Chrome Auth)"]
-        Runtime --> TLS["Chrome 131 uTLS / HTTP2 Client"]
+        Runtime --> TLS["Chrome 142-157 uTLS / HTTP2 Client"]
     end
     TLS -->|"Bard StreamGenerate / BatchExecute RPC"| Google["gemini.google.com Upstream"]
 ```
@@ -64,11 +65,11 @@ flowchart LR
 
 ### 方式二：从 GitHub Releases 下载预编译包
 1. 前往 [Releases](https://github.com/jianli9158/cpa-plugin-gemini-web2api/releases) 下载对应平台的压缩包：
-   - macOS Apple Silicon: `gemini-web2api_1.0.0_darwin_arm64.zip`
-   - macOS Intel: `gemini-web2api_1.0.0_darwin_amd64.zip`
-   - Linux x86_64: `gemini-web2api_1.0.0_linux_amd64.zip`
-   - Linux ARM64: `gemini-web2api_1.0.0_linux_arm64.zip`
-   - Windows x86_64: `gemini-web2api_1.0.0_windows_amd64.zip`
+   - macOS Apple Silicon: `gemini-web2api_1.0.4_darwin_arm64.zip`
+   - macOS Intel: `gemini-web2api_1.0.4_darwin_amd64.zip`
+   - Linux x86_64: `gemini-web2api_1.0.4_linux_amd64.zip`
+   - Linux ARM64: `gemini-web2api_1.0.4_linux_arm64.zip`
+   - Windows x86_64: `gemini-web2api_1.0.4_windows_amd64.zip`
 2. 解压出动态库文件（`gemini-web2api.dylib` / `gemini-web2api.so` / `gemini-web2api.dll`），放入 CLIProxyAPI 的插件目录：
    ```text
    plugins/<goos>/<goarch>/gemini-web2api.{dylib,so,dll}
@@ -106,7 +107,8 @@ plugins:
       enabled: true
       data_dir: "~/.gemini-web2api"
       guest_enabled: true
-      per_account_concurrency: 1
+      continue_session: false
+      per_account_concurrency: 2
       routing_strategy: "round-robin"
       account_order: ""
       model_accounts: ""
@@ -125,7 +127,8 @@ plugins:
 | `data_dir` | `string` | `"~/.gemini-web2api"` | 插件内部账户凭证、冷却状态与请求历史数据库存储路径 |
 | `guest_enabled` | `bool` | `true` | 是否开启免登录访客（`guest`）匿名会话 |
 | `proxy` | `string` | `""` | 访问 `gemini.google.com` 的上游代理（支持 `http://`、`https://`、`socks5://`） |
-| `per_account_concurrency` | `int` | `1` | 单 Google 账号最大并发请求数 |
+| `continue_session` | `bool` | `false` | 是否跨后续请求恢复并续接持久化网页会话（`false` 时每次新建网页会话） |
+| `per_account_concurrency` | `int` | `2` | 单 Google 账号最大并发请求数 |
 | `routing_strategy` | `string` | `"round-robin"` | 多账号路由策略（`round-robin` 轮询 / `fill-first` 优先占满） |
 | `account_order` | `string` | `""` | `fill-first` 模式下逗号分隔的账号优先级顺序 |
 | `model_accounts` | `string` | `""` | 按模型限定可用账号（如 `gemini-4-carbon:acc1|acc2`） |

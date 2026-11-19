@@ -17,6 +17,7 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/adapter"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/auth"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/requestdb"
@@ -26,7 +27,7 @@ const dataDir = "data"
 
 // Version returns the plugin runtime version.
 func Version() string {
-	return "1.0.3"
+	return "1.0.4"
 }
 
 func authDir(paths []string) string {
@@ -105,6 +106,12 @@ func NewPluginRuntime(ctx context.Context, cfg config.Config, runtimeDataDir str
 		return nil, fmt.Errorf("open request db: %w", err)
 	}
 	store.SetBodyCapture(cfg.RequestBodyLog)
+	if err := gemini.LoadModelNames(store); err != nil {
+		_ = store.Close()
+		cancel()
+		return nil, fmt.Errorf("load model names: %w", err)
+	}
+	go recordLogs(runtimeCtx, store)
 
 	authDirectory := authDir(cfg.AuthStatePaths)
 	if len(cfg.AuthStatePaths) > 0 && strings.TrimSpace(cfg.AuthStatePaths[0]) != "" {
@@ -153,6 +160,7 @@ func NewPluginRuntime(ctx context.Context, cfg config.Config, runtimeDataDir str
 	pool.SetModelAccounts(cfg.ModelAccounts)
 	adapter.SetFirstEventHedge(parseFirstEventHedge(cfg))
 	adapter.SetResponseModes(cfg.NonstreamKeepalive, cfg.FakeStream)
+	adapter.SetContinueSession(cfg.ContinueSession)
 	manager := accounts.New(runtimeCtx, pool, accounts.Settings{
 		InitTimeout:   cfg.InitTimeout,
 		RetryInterval: cfg.AccountCooldown,
@@ -244,6 +252,7 @@ func (rt *PluginRuntime) ApplyConfig(next config.Config, guestEnabled bool) {
 	rt.Pool.SetModelAccounts(next.ModelAccounts)
 	adapter.SetFirstEventHedge(parseFirstEventHedge(next))
 	adapter.SetResponseModes(next.NonstreamKeepalive, next.FakeStream)
+	adapter.SetContinueSession(next.ContinueSession)
 	rt.Accounts.SetSettings(accounts.Settings{
 		InitTimeout:   next.InitTimeout,
 		RetryInterval: next.AccountCooldown,
@@ -295,6 +304,7 @@ func (rt *PluginRuntime) Close() error {
 	}
 	if rt.Store != nil {
 		adapter.DetachStorage(rt.Store)
+		gemini.DetachModelNameStore(rt.Store)
 		return rt.Store.Close()
 	}
 	return nil
@@ -319,4 +329,22 @@ func (rt *PluginRuntime) ReadAccountStorageState(accountID string) ([]byte, *aut
 		return raw, nil, err
 	}
 	return raw, &state, nil
+}
+
+func recordLogs(ctx context.Context, store *requestdb.Store) {
+	for {
+		_, events, cancel := logging.Subscribe(0)
+		for open := true; open; {
+			select {
+			case <-ctx.Done():
+				cancel()
+				return
+			case event, ok := <-events:
+				open = ok
+				if ok && (event.Level == "WARN" || event.Level == "ERROR") {
+					store.RecordLog(event)
+				}
+			}
+		}
+	}
 }

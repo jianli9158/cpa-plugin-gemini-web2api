@@ -12,16 +12,17 @@
 
 > **Upstream Attribution & Acknowledgements**  
 > This repository is a native **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** dynamic-library plugin port (C ABI v1 / Schema v10) of **[Mag1cFall/Gemini-Web2API](https://github.com/Mag1cFall/Gemini-Web2API)**.  
-> The core Google Gemini Web protocol stack (`gemini.google.com` Bard/StreamGenerate batch RPC, Chrome 131 TLS/HTTP2 fingerprint emulation, automatic Cookie rotation, keyless Guest sessions, multi-account load balancing, and multi-protocol translation) originates from **[Mag1cFall/Gemini-Web2API](https://github.com/Mag1cFall/Gemini-Web2API)** under the [MIT License](./LICENSE).
+> The core Google Gemini Web protocol stack (`gemini.google.com` Bard/StreamGenerate batch RPC, Chrome 142–157 TLS/HTTP2 fingerprint emulation, automatic Cookie rotation, keyless Guest sessions, multi-account load balancing, and multi-protocol translation) originates from **[Mag1cFall/Gemini-Web2API](https://github.com/Mag1cFall/Gemini-Web2API)** under the [MIT License](./LICENSE).
 
 ---
 
 ## Key Features
 
-- **Pure Go Native Shared Library · Zero External Runtime Dependencies**: Uses `bogdanfinn/tls-client` to emulate Chrome 131 TLS/HTTP2 fingerprints directly inside the compiled shared library (`.dylib` / `.so` / `.dll`)—no Python, Node.js, Playwright, or headless browser required.
+- **Pure Go Native Shared Library · Zero External Runtime Dependencies**: Uses `Mag1cFall/fhttp` and `bogdanfinn/tls-client` to emulate Chrome 142–157 TLS/HTTP2 fingerprints (including `x-sec-ch-ua-not-a-border` and weighted version pools) directly inside the compiled shared library (`.dylib` / `.so` / `.dll`)—no Python, Node.js, Playwright, or headless browser required.
 - **Full Google Gemini Web Model & Feature Coverage**:
-  - **Core Chat & Reasoning Models**: `gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-4-carbon`, `gemini-4-argon` (plus `-task` variants and custom model mappings), with Thinking Level controls.
+  - **Core Chat & Reasoning Models**: `gemini-default`, `gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-4-carbon`, `gemini-4-argon` (with persistent upstream model-rename tracking, `google/` & `models/` prefix compatibility, and custom model mappings), with Thinking Level controls.
   - **Feature Variants & Multimodal**: `gemini-3.1-flash-image` (image generation & editing), `gemini-video` (Veo video generation), `gemini-music` (Lyria music), `gemini-canvas`, `gemini-deep-research`, `gemini-guided-learning`, and audio TTS/STT (`/v1/audio/*`).
+  - **Extended Endpoints**: Interactions API (`/v1/interactions`, `/v1beta/interactions`), Gemini Context Caching (`/v1/cachedContents`, `/v1beta/cachedContents`), OpenAI Responses API, and MCP endpoint.
 - **Keyless Guest Session + Multi-Source Google Account Pool**:
   - Out-of-the-box **keyless Guest session** support;
   - **One-click isolated local Chrome login** and **Cookie / Playwright StorageState import**;
@@ -50,7 +51,7 @@ flowchart LR
         Router["Model Router & Scheduler"] --> Runtime["Gemini-Web2API PluginRuntime"]
         Runtime --> Pool["Account Pool & Cooldown Store"]
         Runtime --> Mgr["Account Manager (Guest / CookieRotator / Chrome Auth)"]
-        Runtime --> TLS["Chrome 131 uTLS / HTTP2 Client"]
+        Runtime --> TLS["Chrome 142-157 uTLS / HTTP2 Client"]
     end
     TLS -->|"Bard StreamGenerate / BatchExecute RPC"| Google["gemini.google.com Upstream"]
 ```
@@ -64,11 +65,11 @@ Open the CLIProxyAPI Management Center (or EasyCLIProxyAPI desktop app), navigat
 
 ### Option 2: Download Prebuilt Binary from GitHub Releases
 1. Download the archive for your platform from [Releases](https://github.com/jianli9158/cpa-plugin-gemini-web2api/releases):
-   - macOS Apple Silicon: `gemini-web2api_1.0.0_darwin_arm64.zip`
-   - macOS Intel: `gemini-web2api_1.0.0_darwin_amd64.zip`
-   - Linux x86_64: `gemini-web2api_1.0.0_linux_amd64.zip`
-   - Linux ARM64: `gemini-web2api_1.0.0_linux_arm64.zip`
-   - Windows x86_64: `gemini-web2api_1.0.0_windows_amd64.zip`
+   - macOS Apple Silicon: `gemini-web2api_1.0.4_darwin_arm64.zip`
+   - macOS Intel: `gemini-web2api_1.0.4_darwin_amd64.zip`
+   - Linux x86_64: `gemini-web2api_1.0.4_linux_amd64.zip`
+   - Linux ARM64: `gemini-web2api_1.0.4_linux_arm64.zip`
+   - Windows x86_64: `gemini-web2api_1.0.4_windows_amd64.zip`
 2. Extract the dynamic library (`gemini-web2api.dylib` / `gemini-web2api.so` / `gemini-web2api.dll`) into CLIProxyAPI's plugin directory:
    ```text
    plugins/<goos>/<goarch>/gemini-web2api.{dylib,so,dll}
@@ -106,7 +107,8 @@ plugins:
       enabled: true
       data_dir: "~/.gemini-web2api"
       guest_enabled: true
-      per_account_concurrency: 1
+      continue_session: false
+      per_account_concurrency: 2
       routing_strategy: "round-robin"
       account_order: ""
       model_accounts: ""

@@ -43,6 +43,9 @@ func TestPluginLifecycleAndCapabilities(t *testing.T) {
 	if !strings.Contains(string(regJSON), `"Name":"gemini-web2api"`) {
 		t.Fatalf("unexpected registration metadata: %s", string(regJSON))
 	}
+	if !strings.Contains(string(regJSON), `"Version":"1.0.4"`) || !strings.Contains(string(regJSON), `"continue_session"`) {
+		t.Fatalf("expected version 1.0.4 and continue_session config field: %s", string(regJSON))
+	}
 	if !strings.Contains(string(regJSON), `"executor":true`) || !strings.Contains(string(regJSON), `"auth_provider":true`) {
 		t.Fatalf("missing expected capabilities: %s", string(regJSON))
 	}
@@ -434,14 +437,32 @@ func TestPluginReloadAndSchedulerFiltering(t *testing.T) {
 		t.Fatalf("expected acc1 for model_accounts-restricted gemini-4-carbon, got %s", got)
 	}
 
-	// Reconfigure live via plugin.reconfigure (ApplyConfig path) and verify updated bindings + round-robin take effect.
-	cfg2 := []byte("data_dir: " + tmpDir + "\nauto_start: false\nguest_enabled: false\nrouting_strategy: round-robin\naccount_order: acc1@example.com,acc2@example.com\nmodel_accounts: gemini-4-carbon:acc2@example.com\nfirst_event_hedge: off\n")
+	// Reconfigure live via plugin.reconfigure (ApplyConfig path) and verify updated bindings, continue_session + round-robin take effect.
+	cfg2 := []byte("data_dir: " + tmpDir + "\nauto_start: false\nguest_enabled: false\ncontinue_session: true\nrouting_strategy: round-robin\naccount_order: acc1@example.com,acc2@example.com\nmodel_accounts: gemini-4-carbon:acc2@example.com\nfirst_event_hedge: off\n")
 	reconfReq, _ := json.Marshal(map[string]any{
 		"config_yaml":    cfg2,
 		"schema_version": pluginabi.SchemaVersion,
 	})
 	if _, err := p.HandleMethod(pluginabi.MethodPluginReconfigure, reconfReq); err != nil {
 		t.Fatalf("plugin.reconfigure failed: %v", err)
+	}
+	if reconfCfg := p.Config(); reconfCfg.ContinueSession == nil || !*reconfCfg.ContinueSession {
+		t.Fatalf("expected continue_session=true after reconfigure, got: %+v", reconfCfg.ContinueSession)
+	}
+	if got := pickModel("google/gemini-4-carbon"); got != "gemini-web2api-acc2.json" {
+		t.Fatalf("expected acc2 for google/gemini-4-carbon after reconfigure, got %s", got)
+	}
+	googleRouteReq, _ := json.Marshal(pluginapi.ModelRouteRequest{
+		RequestedModel: "google/gemini-4-carbon",
+		Body:           []byte(`{"model":"google/gemini-4-carbon","messages":[{"role":"user","content":"hi"}]}`),
+	})
+	googleRouteRes, err := p.HandleMethod(pluginabi.MethodModelRoute, googleRouteReq)
+	if err != nil {
+		t.Fatalf("model.route google/ failed: %v", err)
+	}
+	grResp := googleRouteRes.(pluginapi.ModelRouteResponse)
+	if !grResp.Handled || grResp.TargetKind != pluginapi.ModelRouteTargetSelf || grResp.TargetModel != "google/gemini-4-carbon" {
+		t.Fatalf("unexpected model.route google/ response: %+v", grResp)
 	}
 	if rt.Pool.AllowsAccountForModel(t.Context(), "acc1@example.com", "gemini-4-carbon") {
 		t.Fatalf("expected acc1 to be excluded after reconfigure")

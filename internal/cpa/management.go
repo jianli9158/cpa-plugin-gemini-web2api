@@ -460,8 +460,9 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		return jsonManagementResponse(http.StatusOK, map[string]any{"models": models}), nil
 
 	case method == http.MethodGet && path == "/v0/management/gemini-web2api/logs":
-		return jsonManagementResponse(http.StatusOK, map[string]any{"logs": logging.History()}), nil
-
+		logs, _, cancel := logging.Subscribe(500)
+		cancel()
+		return jsonManagementResponse(http.StatusOK, map[string]any{"logs": logs}), nil
 	default:
 		return jsonManagementResponse(http.StatusNotFound, map[string]any{
 			"error": fmt.Sprintf("route %s %s not found", method, path),

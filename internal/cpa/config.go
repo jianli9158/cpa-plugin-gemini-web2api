@@ -13,7 +13,7 @@ import (
 
 const (
 	PluginID      = "gemini-web2api"
-	PluginVersion = "1.0.3"
+	PluginVersion = "1.0.4"
 	ProviderID    = "gemini-web2api"
 )
 
@@ -23,6 +23,7 @@ type PluginConfig struct {
 	AccountsDir           string            `json:"accounts_dir" yaml:"accounts_dir"`
 	Proxy                 string            `json:"proxy" yaml:"proxy"`
 	SaveHistory           *bool             `json:"save_history" yaml:"save_history"`
+	ContinueSession       *bool             `json:"continue_session" yaml:"continue_session"`
 	GuestEnabled          *bool             `json:"guest_enabled" yaml:"guest_enabled"`
 	ModelMapping          string            `json:"model_mapping" yaml:"model_mapping"`
 	ModelAliases          map[string]string `json:"model_aliases" yaml:"model_aliases"`
@@ -78,6 +79,9 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 			}
 			if pcfg.SaveHistory == nil {
 				pcfg.SaveHistory = opt.SaveHistory
+			}
+			if pcfg.ContinueSession == nil {
+				pcfg.ContinueSession = opt.ContinueSession
 			}
 			if pcfg.GuestEnabled == nil {
 				pcfg.GuestEnabled = opt.GuestEnabled
@@ -264,6 +268,7 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 		ModelAccounts:         modelAccounts,
 		ModelMapping:          modelMapping,
 		SaveHistory:           boolOrDefault(pcfg.SaveHistory, false),
+		ContinueSession:       boolOrDefault(pcfg.ContinueSession, false),
 		NonstreamKeepalive:    true,
 		FakeStream:            boolOrDefault(pcfg.FakeStream, false),
 		LogLevel:              logLevel,

@@ -75,10 +75,13 @@ func ImportCookies(ctx context.Context, options CookieImportOptions) (string, in
 	return paths[0], modelCount, nil
 }
 
-// importIdentity 返回写入 path 的账号身份与导入请求使用的代理：账号已导入过时沿用它的停用标记与未重新填写的固定代理
+// importIdentity 返回写入 path 的账号身份与导入请求使用的代理：账号已导入过时沿用它的停用标记、Chrome 版本、配对续签摘要与未重新填写的固定代理，新账号按版本池占比分配 Chrome 版本
 func importIdentity(path string, metadata auth.Metadata, fallback string) (auth.Metadata, string, error) {
 	metadata.Proxy = strings.TrimSpace(metadata.Proxy)
 	metadata = auth.Inherit(path, metadata)
+	if !gemini.IsChromeVersion(metadata.Chrome) {
+		metadata.Chrome = gemini.PickChromeVersion()
+	}
 	fixed, requestProxy, err := importProxies(metadata.Proxy, fallback)
 	metadata.Proxy = fixed
 	return metadata, requestProxy, err
@@ -124,6 +127,7 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]st
 			Cookies:  auth.GeminiCookies(item.state.Cookies),
 			Language: item.state.Metadata.Language,
 			AuthUser: item.state.Metadata.AuthUser,
+			Chrome:   item.state.Metadata.Chrome,
 			Save: func(cookies []gemini.Cookie) error {
 				item.state.Cookies = auth.StateCookies(cookies)
 				return nil

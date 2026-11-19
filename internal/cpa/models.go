@@ -114,7 +114,7 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 		}
 	}
 
-	if p.hasReadyAccount() && p.isKnownModel(model) {
+	if boolOrDefault(p.Config().RouteUnprefixedModels, true) && p.hasReadyAccount() && p.isKnownModel(model) {
 		hasBuiltinGemini := false
 		for _, prov := range req.AvailableProviders {
 			pLower := strings.ToLower(strings.TrimSpace(prov))
@@ -150,14 +150,14 @@ func (p *Plugin) hasReadyAccount() bool {
 
 func (p *Plugin) isKnownModel(modelID string) bool {
 	clean := StripModelPrefix(modelID, p.Config().ModelPrefix)
-	clean = strings.TrimPrefix(clean, "models/")
+	clean = gemini.NormalizeModelID(clean)
 	if clean == "" {
 		return false
 	}
-	mapped := config.MapModel(clean)
+	mapped := gemini.CanonicalModelID(config.MapModel(clean))
 	for _, m := range p.collectCatalogModelsForAccount("") {
-		id := strings.TrimPrefix(strings.TrimSpace(m.ID), "models/")
-		if strings.EqualFold(id, clean) || strings.EqualFold(id, mapped) {
+		id := gemini.NormalizeModelID(m.ID)
+		if strings.EqualFold(id, clean) || strings.EqualFold(id, mapped) || gemini.CanonicalModelID(id) == mapped {
 			return true
 		}
 	}
@@ -196,6 +196,28 @@ func (p *Plugin) collectCatalogModelsForAccount(accountID string) []pluginapi.Mo
 					byID[m.ID] = cm
 				}
 				if len(rawModels) > 0 {
+					if _, exists := byID[gemini.DefaultModelID]; !exists {
+						var defaultLevels []gemini.ThinkingLevel
+						for _, m := range rawModels {
+							if m.Default {
+								defaultLevels = m.ThinkingLevels
+								break
+							}
+						}
+						rawModels = append(rawModels, adapter.CatalogModel{
+							Model: gemini.Model{
+								ID:             gemini.DefaultModelID,
+								DisplayName:    "Default",
+								Description:    "Each account's official default model",
+								Capabilities:   []string{"generateContent", "streamGenerateContent"},
+								ThinkingLevels: defaultLevels,
+							},
+							MinInputTokenLimit: client.ContextWindow(),
+							MaxInputTokenLimit: client.ContextWindow(),
+							AccountCount:       1,
+							Accounts:           []string{accountID},
+						})
+					}
 					aliases := config.ModelAliases()
 					names := make([]string, 0, len(aliases))
 					for alias := range aliases {
@@ -203,11 +225,25 @@ func (p *Plugin) collectCatalogModelsForAccount(accountID string) []pluginapi.Mo
 					}
 					sort.Strings(names)
 					for _, alias := range names {
-						target, ok := byID[aliases[alias]]
+						target, ok := byID[gemini.CanonicalModelID(aliases[alias])]
 						if _, exists := byID[alias]; !ok || exists {
 							continue
 						}
-						target.ID, target.AliasOf, target.Default = alias, aliases[alias], false
+						target.ID, target.AliasOf, target.Default = alias, target.ID, false
+						rawModels = append(rawModels, target)
+					}
+					renames := gemini.ModelRenames()
+					olds := make([]string, 0, len(renames))
+					for old := range renames {
+						olds = append(olds, old)
+					}
+					sort.Strings(olds)
+					for _, old := range olds {
+						target, ok := byID[renames[old]]
+						if _, exists := byID[old]; !ok || exists {
+							continue
+						}
+						target.ID, target.AliasOf, target.Default = old, renames[old], false
 						rawModels = append(rawModels, target)
 					}
 				}
@@ -420,6 +456,17 @@ func defaultFallbackModels() []adapter.CatalogModel {
 				Capabilities:   []string{"guided_learning", "thinking"},
 				ThinkingLevels: []gemini.ThinkingLevel{gemini.ThinkingLow, gemini.ThinkingMedium, gemini.ThinkingHigh},
 				Feature:        gemini.FeatureLearning,
+			},
+			MinInputTokenLimit: 1048576,
+			MaxInputTokenLimit: 1048576,
+		},
+		{
+			Model: gemini.Model{
+				ID:             gemini.DefaultModelID,
+				DisplayName:    "Default",
+				Description:    "Each account's official default model",
+				Capabilities:   []string{"generateContent", "streamGenerateContent"},
+				ThinkingLevels: []gemini.ThinkingLevel{gemini.ThinkingLow, gemini.ThinkingMedium, gemini.ThinkingHigh},
 			},
 			MinInputTokenLimit: 1048576,
 			MaxInputTokenLimit: 1048576,

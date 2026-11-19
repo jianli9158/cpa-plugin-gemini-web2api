@@ -236,6 +236,12 @@ func (p *Plugin) handleRegister(raw []byte) (any, error) {
 					Description: "Save generated conversations to Google Gemini Web account history",
 				},
 				{
+					Name:        "continue_session",
+					Type:        pluginapi.ConfigFieldTypeBoolean,
+					Default:     false,
+					Description: "Resume persisted Gemini Web conversation sessions across subsequent requests",
+				},
+				{
 					Name:        "per_account_concurrency",
 					Type:        pluginapi.ConfigFieldTypeInteger,
 					Default:     2,

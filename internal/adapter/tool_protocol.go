@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 )
 
 // callStartPattern 匹配调用块的开头，上游以 Markdown 转义方括号时前面带反斜杠
@@ -25,6 +26,16 @@ var argEndPattern = regexp.MustCompile(`^\\?\[\s*\\?/\s*Arg\s*\\?\]`)
 
 // callEndPattern 匹配位于开头的调用块结尾
 var callEndPattern = regexp.MustCompile(`^\\?\[\s*\\?/\s*Call\s*\\?\]`)
+
+// callEndAnywherePattern 匹配任意位置的调用块结尾
+var callEndAnywherePattern = regexp.MustCompile(`\\?\[\s*\\?/\s*Call\s*\\?\]`)
+
+// callsComplete 判断正文以完整的调用块结尾：最后一个调用块结尾标记之后只有空白
+func callsComplete(text string) bool {
+	text = strings.TrimRightFunc(text, unicode.IsSpace)
+	locations := callEndAnywherePattern.FindAllStringIndex(text, -1)
+	return len(locations) > 0 && locations[len(locations)-1][1] == len(text)
+}
 
 // structureAnywherePattern 在任意位置匹配参数段开头、参数段结尾或调用块结尾
 var structureAnywherePattern = regexp.MustCompile(`\\?\[\s*(?:Arg\s*\\?:|\\?/\s*(?:Arg|Call)\s*\\?\])`)
@@ -95,6 +106,18 @@ func codeSpanAt(text string, position int) (inside, unclosed bool) {
 	return false, unclosed
 }
 
+// dropUnfinishedCalls 从最后一个调用块开头起逐个去掉没有写完的调用块，返回只含已写完调用块的回答
+func dropUnfinishedCalls(text string) string {
+	for {
+		location := firstCallStart(text)
+		if _, _, found, err := splitCallBlocks(text); !found || err == nil {
+			return text
+		}
+		starts := callStartPattern.FindAllStringIndex(text[location[0]:], -1)
+		text = strings.TrimRightFunc(text[:location[0]+starts[len(starts)-1][0]], unicode.IsSpace)
+	}
+}
+
 // splitCallBlocks 把回答分为调用块之前的文字与连续的调用块，之后的内容丢弃；找到调用块开头时 found 为真，调用块没有写完时返回错误
 func splitCallBlocks(text string) (before string, blocks []callBlock, found bool, err error) {
 	location := firstCallStart(text)
@@ -136,7 +159,7 @@ func splitCallBlocks(text string) (before string, blocks []callBlock, found bool
 	}
 }
 
-// argValue 返回参数段的值与其后的内容：值写在代码块中时取代码块原文，结束标记取其后紧跟结构标记或回答结尾的第一行；不在代码块中的值取到下一个结构标记为止
+// argValue 返回参数段的值与其后的内容：值写在代码块中时取代码块原文，结束标记取其后紧跟结构标记或回答结尾的第一行；不在代码块中的值取到下一个结构标记为止，漏写开头围栏时去掉末尾单独成行的结束围栏
 func argValue(text string) (string, string) {
 	body := strings.TrimLeft(text, " \t")
 	if newline := strings.IndexByte(body, '\n'); newline >= 0 && strings.TrimSpace(body[:newline]) == "" {
@@ -148,7 +171,13 @@ func argValue(text string) (string, string) {
 		if location := structureAnywherePattern.FindStringIndex(body); location != nil {
 			end = location[0]
 		}
-		return strings.TrimSpace(body[:end]), body[end:]
+		value := strings.TrimSpace(body[:end])
+		if newline := strings.LastIndexByte(value, '\n'); newline >= 0 {
+			if last := strings.TrimSpace(value[newline+1:]); len(last) >= 3 && strings.Trim(last, "`") == "" {
+				value = strings.TrimRight(value[:newline], " \t\r")
+			}
+		}
+		return value, body[end:]
 	}
 	newline := strings.IndexByte(body, '\n')
 	if newline < 0 {
@@ -182,7 +211,7 @@ func structureFollows(after string) bool {
 	return location != nil && location[0] == 0
 }
 
-// resolveCalls 按声明把调用块转为工具调用：工具名去掉前导下划线后匹配，参数按 Schema 还原类型后校验
+// resolveCalls 按声明把调用块转为工具调用：工具名去掉前导下划线后匹配，参数按 Schema 还原类型后校验；请求没有强制工具调用时丢弃未声明的工具调用
 func (b ToolBridge) resolveCalls(blocks []callBlock) ([]ToolCall, error) {
 	if len(blocks) == 0 {
 		return nil, fmt.Errorf("模型返回的工具调用为空")
@@ -194,7 +223,12 @@ func (b ToolBridge) resolveCalls(blocks []callBlock) ([]ToolCall, error) {
 			name = strings.TrimLeft(name, "_")
 		}
 		if !b.hasTool(name) {
-			return nil, fmt.Errorf("模型返回了未声明的工具 %q", block.Name)
+			if b.requiresTool() || b.explicitTool() != "" {
+				return nil, fmt.Errorf("模型返回了未声明的工具 %q", block.Name)
+			}
+			// 模型写出了未声明的工具调用，例如它自己写出了官网内置工具的调用：请求没有强制工具调用时丢弃该调用，不因此让整条回答失败
+			logging.Warn(logging.SourceRequest, "丢弃模型返回的未声明工具调用", "工具", block.Name)
+			continue
 		}
 		if b.explicitTool() != "" && name != b.explicitTool() {
 			return nil, fmt.Errorf("模型返回工具 %q，预期工具 %q", name, b.explicitTool())

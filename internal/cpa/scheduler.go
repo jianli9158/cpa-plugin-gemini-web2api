@@ -8,6 +8,7 @@ import (
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/pluginapi"
 )
 
@@ -66,8 +67,7 @@ func (p *Plugin) handleSchedulerPick(raw []byte) (any, error) {
 	}
 
 	cleanModel := StripModelPrefix(req.Model, p.Config().ModelPrefix)
-	cleanModel = strings.TrimPrefix(cleanModel, "models/")
-	cleanModel = config.MapModel(cleanModel)
+	cleanModel = gemini.CanonicalModelID(config.MapModel(cleanModel))
 
 	candidateByAccount := make(map[string]string, len(geminiWebCandidates))
 	var poolFallbackCandidateID string
@@ -114,7 +114,7 @@ func (p *Plugin) handleSchedulerPick(raw []byte) (any, error) {
 		}
 		modelCooling := false
 		for _, mc := range acc.ModelCooldowns {
-			if strings.EqualFold(mc.Model, cleanModel) && now.Before(mc.Until) {
+			if (strings.EqualFold(mc.Model, cleanModel) || gemini.CanonicalModelID(mc.Model) == cleanModel) && now.Before(mc.Until) {
 				modelCooling = true
 				break
 			}

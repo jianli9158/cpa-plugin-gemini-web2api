@@ -356,6 +356,11 @@ func RunIncognitoLogin(ctx context.Context, req IsolatedLoginRequest) (IsolatedL
 	if strings.TrimSpace(req.OutputDir) != "" {
 		storagePath = filepath.Join(req.OutputDir, accountID, storageFileName)
 		state.Metadata = auth.Inherit(storagePath, state.Metadata)
+	}
+	if !gemini.IsChromeVersion(state.Metadata.Chrome) {
+		state.Metadata.Chrome = gemini.PickChromeVersion()
+	}
+	if storagePath != "" {
 		file, err := auth.New(storagePath, state)
 		if err != nil {
 			return IsolatedLoginResult{}, err
@@ -364,7 +369,6 @@ func RunIncognitoLogin(ctx context.Context, req IsolatedLoginRequest) (IsolatedL
 			return IsolatedLoginResult{}, err
 		}
 	}
-
 	var closeErrText string
 	if closeErr != nil {
 		closeErrText = closeErr.Error()
