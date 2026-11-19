@@ -215,6 +215,25 @@ func (c ModelCatalog) Default() (Model, error) {
 	return c.models[c.defaultIndex], nil
 }
 
+// MatchesBaseOrDefaultHash 报告会话轮询返回的模型 hash 是否匹配该模型本身、同 mode 基础模型或官方默认模型
+func (c ModelCatalog) MatchesBaseOrDefaultHash(model Model, hash string) bool {
+	if hash == "" {
+		return false
+	}
+	if hash == model.Hash {
+		return true
+	}
+	for _, entry := range c.models {
+		if entry.Variant == "" && entry.Mode == model.Mode && entry.Hash == hash {
+			return true
+		}
+	}
+	if def, err := c.Default(); err == nil && def.Hash == hash {
+		return true
+	}
+	return false
+}
+
 var modelSlugPattern = regexp.MustCompile(`[^a-z0-9.]+`)
 
 // catalogLanguage 是模型目录请求的界面语言，使模型名与公开 ID 不随账户界面语言变化

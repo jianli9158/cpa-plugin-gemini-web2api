@@ -129,13 +129,15 @@ func (relay *Relay) handle(client net.Conn) {
 	<-done
 }
 
-// pipe 单向转发到源端结束，正常结束时只关闭对端写方向，出错或对端不支持半关闭时关闭两端
+// pipe 单向转发到源端结束，正常结束时半关闭对端写方向并限定剩余读超时以防挂死，出错或不支持半关闭时立即关闭两端
 func pipe(destination, source net.Conn, done chan<- struct{}) {
 	_, err := io.Copy(destination, source)
 	writer, halfClose := destination.(interface{ CloseWrite() error })
 	if err != nil || !halfClose || writer.CloseWrite() != nil {
 		_ = destination.Close()
 		_ = source.Close()
+	} else {
+		_ = destination.SetReadDeadline(time.Now().Add(30 * time.Second))
 	}
 	done <- struct{}{}
 }

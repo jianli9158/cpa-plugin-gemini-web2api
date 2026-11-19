@@ -17,20 +17,14 @@ type Deps struct {
 	Pool     *balancer.AccountPool
 	Store    *requestdb.Store
 	Accounts *accounts.Manager
-	// APIKey 返回当前生效的公开 API key，多个 key 以逗号分隔
-	APIKey func() string
 }
 
-// localProxies 是可以代客户端声明来源地址的对端：只有本机的反向代理转发的 X-Forwarded-For 计入客户端地址
-var localProxies = []string{"127.0.0.1", "::1"}
-
-// NewRouter 注册就绪检查与全部兼容 API
+// NewRouter 注册就绪检查与全部兼容 API（进程内插件 RPC 专用）
 func NewRouter(deps Deps) *gin.Engine {
 	pool := deps.Pool
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
-	_ = router.SetTrustedProxies(localProxies)
-	router.Use(gin.Recovery(), securityHeaders)
+	router.Use(gin.Recovery())
 	router.GET("/readyz", func(c *gin.Context) {
 		status := pool.Status()
 		body := gin.H{"status": "ready", "accounts": status.Total, "available": status.Available, "version": Version()}
@@ -43,10 +37,7 @@ func NewRouter(deps Deps) *gin.Engine {
 	})
 
 	api := router.Group("")
-	api.Use(adapter.CORSMiddleware())
 	api.Use(adapter.RequestMiddleware(deps.Store))
-	api.Use(adapter.AuthMiddleware(deps.APIKey))
-	api.Use(adapter.AccountMiddleware(pool))
 	api.POST("/v1/chat/completions", adapter.ChatCompletionHandler(pool))
 	api.POST("/v1/responses", adapter.ResponsesHandler(pool, deps.Store))
 	api.POST("/v1/images/generations", adapter.ImageGenerationHandler(pool))
@@ -113,7 +104,7 @@ func NewRouter(deps Deps) *gin.Engine {
 	api.GET("/mcp", mcpHandler)
 	api.DELETE("/mcp", mcpHandler)
 
-	router.NoRoute(adapter.CORSMiddleware(), adapter.RequestMiddleware(deps.Store), func(c *gin.Context) {
+	router.NoRoute(adapter.RequestMiddleware(deps.Store), func(c *gin.Context) {
 		path := c.Request.URL.Path
 		switch {
 		case adapter.IsGeminiRequest(c):
@@ -125,14 +116,4 @@ func NewRouter(deps Deps) *gin.Engine {
 		}
 	})
 	return router
-}
-
-// securityHeaders 禁止页面被其他站点嵌入并关闭 MIME 嗅探与 Referer
-func securityHeaders(c *gin.Context) {
-	header := c.Writer.Header()
-	header.Set("X-Frame-Options", "DENY")
-	header.Set("Content-Security-Policy", "frame-ancestors 'none'")
-	header.Set("X-Content-Type-Options", "nosniff")
-	header.Set("Referrer-Policy", "no-referrer")
-	c.Next()
 }

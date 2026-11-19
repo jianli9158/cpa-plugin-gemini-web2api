@@ -177,16 +177,15 @@ func newMediaClient(timeoutSeconds int, proxyURL string, major int) (tls_client.
 	)
 }
 
-// publicAddress 解析 host 并返回第一个地址，解析结果含本机、私网、链路本地、组播或未指定地址时返回错误
+// publicAddress 解析 host 并返回第一个地址，解析结果含本机、私网、CGNAT、链路本地、组播或未指定地址时返回错误
 func publicAddress(ctx context.Context, host string) (netip.Addr, error) {
 	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 	if err != nil {
 		return netip.Addr{}, err
 	}
 	for _, address := range addresses {
-		address = address.Unmap()
-		if address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast() || address.IsMulticast() || address.IsUnspecified() {
-			return netip.Addr{}, fmt.Errorf("主机 %s 解析到非公网地址 %s", host, address)
+		if IsDisallowedRemoteIP(address) {
+			return netip.Addr{}, fmt.Errorf("主机 %s 解析到非公网地址 %s", host, address.Unmap())
 		}
 	}
 	return addresses[0].Unmap(), nil

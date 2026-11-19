@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  test-and-build:
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            ext: .so
+          - os: macos-15-intel
+            ext: .dylib
+          - os: windows-latest
+            ext: .dll
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: Go Vet & Unit Tests
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build Shared Library
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go build -trimpath -ldflags="-s -w" -buildmode=c-shared -o "gemini-web2api${{ matrix.ext }}" ./cmd/gemini-web2api-plugin

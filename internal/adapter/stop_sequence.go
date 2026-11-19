@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // stopCutter 按停止序列截断候选 0 的正文流：可能构成停止序列开头的末尾文字留到下一块再判断，命中后只转出命中处之前的正文
@@ -52,7 +53,7 @@ func (s *stopCutter) cut(text string) (string, bool) {
 	if s.matched == "" && limit == len(text) {
 		for _, sequence := range s.sequences {
 			for size := min(len(sequence)-1, len(text)); size > 0; size-- {
-				if strings.HasSuffix(text, sequence[:size]) {
+				if utf8.RuneStart(sequence[size]) && strings.HasSuffix(text, sequence[:size]) {
 					end = min(end, len(text)-size)
 					break
 				}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/app"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/pluginabi"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/pluginapi"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/tokencount"
@@ -56,21 +57,34 @@ func (p *Plugin) prepareExecutionContext(
 		return nil, nil, err
 	}
 
-	var payload AuthFilePayload
-	if len(storageJSON) > 0 {
-		_ = json.Unmarshal(storageJSON, &payload)
-	}
 	accountID := extractAccountIDFromAuth(storageJSON, authMetadata, authAttributes)
-	if state, ok := extractStorageStateFromPayload(storageJSON, payload); ok {
-		if id, err := p.upsertAccountInRuntime(rt, accountID, payload, state); err == nil && id != "" {
-			accountID = strings.ToLower(strings.TrimSpace(id))
+	if accountID != "" {
+		if actualID, state, enabled, exists := rt.Pool.LookupAccount(accountID); exists && state != balancer.StateAuthRequired {
+			if state == balancer.StateInitializing {
+				rt.Accounts.WaitFirstInit(baseCtx, actualID)
+				_, _, enabled, _ = rt.Pool.LookupAccount(actualID)
+			}
+			if enabled {
+				return app.ContextWithPinnedAccountID(baseCtx, actualID), rt, nil
+			}
+			return baseCtx, rt, nil
+		}
+	}
+
+	if len(storageJSON) > 0 {
+		var payload AuthFilePayload
+		_ = json.Unmarshal(storageJSON, &payload)
+		if state, ok := extractStorageStateFromPayload(storageJSON, payload); ok {
+			if id, err := p.upsertAccountInRuntime(rt, accountID, payload, state); err == nil && id != "" {
+				accountID = strings.ToLower(strings.TrimSpace(id))
+			}
 		}
 	}
 
 	reqCtx := baseCtx
 	if accountID != "" {
-		if st := findPoolAccountStatus(rt, accountID); st != nil && st.Enabled {
-			reqCtx = app.ContextWithPinnedAccountID(reqCtx, st.AccountID)
+		if actualID, _, enabled, exists := rt.Pool.LookupAccount(accountID); exists && enabled {
+			reqCtx = app.ContextWithPinnedAccountID(reqCtx, actualID)
 		}
 	}
 	return reqCtx, rt, nil
@@ -218,7 +232,9 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		return nil, fmt.Errorf("decode executor.execute request: %w", err)
 	}
 
-	reqCtx, rt, err := p.prepareExecutionContext(p.ctx, req.StorageJSON, req.AuthMetadata, req.AuthAttributes)
+	execCtx, cancelExec := context.WithCancel(p.ctx)
+	defer cancelExec()
+	reqCtx, rt, err := p.prepareExecutionContext(execCtx, req.StorageJSON, req.AuthMetadata, req.AuthAttributes)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +303,8 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 		}, nil
 	}
 
-	sw := newLiveStreamResponseWriter(p, req.StreamID, cancelStream)
+	sw := newLiveStreamResponseWriter(p, streamCtx, req.StreamID, cancelStream)
+	defer close(sw.rpcReturned)
 	go func() {
 		var panicErr *pluginabi.Error
 		defer func() {
@@ -305,13 +322,28 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 		rt.Handler.ServeHTTP(sw, httpReq)
 	}()
 
-	<-sw.headerReady
+	const streamHeaderTimeout = 10 * time.Minute
+	headerTimer := time.NewTimer(streamHeaderTimeout)
+	defer headerTimer.Stop()
+	select {
+	case <-sw.headerReady:
+	case <-streamCtx.Done():
+		<-sw.done
+		return nil, pluginabi.NewError("request_canceled", "stream canceled before response headers", 499)
+	case <-p.ctx.Done():
+		cancelStream()
+		<-sw.done
+		return nil, pluginabi.NewError("service_shutting_down", "plugin shutting down", http.StatusServiceUnavailable)
+	case <-headerTimer.C:
+		cancelStream()
+		<-sw.done
+		return nil, pluginabi.NewError("upstream_timeout", "timed out waiting for upstream stream headers", http.StatusGatewayTimeout)
+	}
 	if sw.statusCode >= 400 {
 		<-sw.done
 		return nil, extractHTTPError(sw.statusCode, sw.header, sw.errBuf.Bytes())
 	}
 
-	defer close(sw.rpcReturned)
 	return rpcExecutorStreamResponse{
 		Headers: sw.clonedHeaders(),
 	}, nil
@@ -319,6 +351,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 
 type liveStreamResponseWriter struct {
 	plugin      *Plugin
+	ctx         context.Context
 	streamID    string
 	cancel      context.CancelFunc
 	header      http.Header
@@ -330,9 +363,10 @@ type liveStreamResponseWriter struct {
 	errBuf      bytes.Buffer
 }
 
-func newLiveStreamResponseWriter(plugin *Plugin, streamID string, cancel context.CancelFunc) *liveStreamResponseWriter {
+func newLiveStreamResponseWriter(plugin *Plugin, ctx context.Context, streamID string, cancel context.CancelFunc) *liveStreamResponseWriter {
 	return &liveStreamResponseWriter{
 		plugin:      plugin,
+		ctx:         ctx,
 		streamID:    streamID,
 		cancel:      cancel,
 		header:      make(http.Header),
@@ -362,7 +396,11 @@ func (w *liveStreamResponseWriter) Write(p []byte) (int, error) {
 	if w.statusCode >= 400 {
 		return w.errBuf.Write(p)
 	}
-	<-w.rpcReturned
+	select {
+	case <-w.rpcReturned:
+	case <-w.ctx.Done():
+		return 0, w.ctx.Err()
+	}
 	if err := w.plugin.emitStreamChunk(w.streamID, p); err != nil {
 		if w.cancel != nil {
 			w.cancel()
@@ -393,8 +431,11 @@ func (w *liveStreamResponseWriter) finishHandler(streamErr *pluginabi.Error) {
 		if streamErr != nil {
 			return
 		}
-		<-w.rpcReturned
-		_ = w.plugin.closeStream(w.streamID, nil)
+		select {
+		case <-w.rpcReturned:
+			_ = w.plugin.closeStream(w.streamID, nil)
+		case <-w.plugin.ctx.Done():
+		}
 	}
 }
 

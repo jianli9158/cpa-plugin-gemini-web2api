@@ -73,7 +73,7 @@ func isGeminiWebProvider(provider string) bool {
 func (p *Plugin) handleAuthIdentifier() (any, error) {
 	return rpcIdentifierResponse{
 		Identifier:          ProviderID,
-		Identifiers:         []string{"gemini-web2api", "gemini-web", "geminiweb2api"},
+		Identifiers:         []string{ProviderID},
 		CredentialProviders: []string{"gemini-web2api", "gemini-web", "geminiweb2api"},
 	}, nil
 }
@@ -356,12 +356,15 @@ func (p *Plugin) upsertAccountInRuntime(
 
 	targetID := chromeauth.AccountID(state.Metadata.ID)
 	if targetID != "" {
-		if existing := findPoolAccountStatus(rt, targetID); existing != nil && existing.State != balancer.StateAuthRequired {
+		if actualID, stateName, _, exists := rt.Pool.LookupAccount(targetID); exists && stateName != balancer.StateAuthRequired {
+			if stateName == balancer.StateInitializing {
+				rt.Accounts.WaitFirstInit(p.ctx, actualID)
+			}
+			return actualID, nil
+		}
+		if existing := findPoolAccountStatus(rt, targetID); existing != nil && existing.State == balancer.StateAuthRequired {
 			if _, existingState, err := rt.ReadAccountStorageState(targetID); err == nil && existingState != nil {
 				if sameCoreAuthCookies(*existingState, state) {
-					if existing.State == balancer.StateInitializing {
-						rt.Accounts.WaitFirstInit(p.ctx, existing.AccountID)
-					}
 					return existing.AccountID, nil
 				}
 			}
@@ -390,7 +393,7 @@ func sameCoreAuthCookies(a, b auth.StorageState) bool {
 			return false
 		}
 	}
-	return ma["SAPISID"] != ""
+	return ma["SAPISID"] != "" || ma["__Secure-1PSID"] != ""
 }
 
 func resolveHostOrigin(baseURL string) string {
@@ -745,9 +748,6 @@ func (p *Plugin) SyncAccountIDToHostAuth(callbackID string, accountID string) er
 	if err != nil {
 		return err
 	}
-	if err := writeAuthDataToDefaultHostDir(authData); err == nil && strings.TrimSpace(callbackID) == "" {
-		return nil
-	}
 	req := map[string]any{
 		"host_callback_id": strings.TrimSpace(callbackID),
 		"name":             authData.FileName,
@@ -755,10 +755,15 @@ func (p *Plugin) SyncAccountIDToHostAuth(callbackID string, accountID string) er
 		"metadata":         authData.Metadata,
 		"attributes":       authData.Attributes,
 	}
-	if _, err := p.callHost(pluginabi.MethodHostAuthSave, req); err != nil {
-		return writeAuthDataToDefaultHostDir(authData)
+	hostSaved := false
+	if _, hostErr := p.callHost(pluginabi.MethodHostAuthSave, req); hostErr == nil {
+		hostSaved = true
 	}
-	return nil
+	diskErr := writeAuthDataToDefaultHostDir(authData)
+	if hostSaved || diskErr == nil {
+		return nil
+	}
+	return diskErr
 }
 
 func writeAuthDataToDefaultHostDir(authData pluginapi.AuthData) error {

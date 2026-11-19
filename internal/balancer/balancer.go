@@ -315,6 +315,8 @@ func (p *AccountPool) Register(accountID string, info AccountInfo, disabled bool
 	}
 	if entry := p.entry(accountID); entry != nil {
 		entry.Info, entry.State = info, state
+		p.sortLocked()
+		p.notifyLocked()
 		return
 	}
 	p.entries = append(p.entries, &accountEntry{AccountID: accountID, Info: info, State: state, ModelCooldowns: make(map[string]cooldown), registered: p.registered})
@@ -495,6 +497,20 @@ func (p *AccountPool) nextForPinned(pinnedID string, sessionKey string, modelID 
 	p.mu.Lock()
 	now := time.Now()
 	p.cleanupSessions(now)
+	if sessionKey != "" {
+		if binding, ok := p.sessions[sessionKey]; ok && now.Before(binding.ExpiresAt) {
+			entry := p.entry(binding.AccountID)
+			_, excluded := excludedAccountIDs[binding.AccountID]
+			if entry != nil && !excluded && p.schedulable(entry, now, modelID) {
+				entry.LastUsed = now
+				p.sessions[sessionKey] = sessionBinding{AccountID: entry.AccountID, ExpiresAt: now.Add(p.sessionTTL)}
+				p.mu.Unlock()
+				return entry.Client, entry.AccountID
+			}
+			p.mu.Unlock()
+			return nil, binding.AccountID
+		}
+	}
 	if _, excluded := excludedAccountIDs[pinnedID]; !excluded {
 		if entry := p.entry(pinnedID); entry != nil && p.schedulable(entry, now, modelID) {
 			entry.LastUsed = now
@@ -513,11 +529,14 @@ func (p *AccountPool) nextForPinned(pinnedID string, sessionKey string, modelID 
 func (p *AccountPool) joinQueue(pinnedID string, sessionKey string, modelID string, excludedAccountIDs map[string]struct{}) (string, chan struct{}) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	bound := pinnedID
-	if bound == "" {
-		if binding, ok := p.sessions[sessionKey]; ok && sessionKey != "" && time.Now().Before(binding.ExpiresAt) {
+	bound := ""
+	if sessionKey != "" {
+		if binding, ok := p.sessions[sessionKey]; ok && time.Now().Before(binding.ExpiresAt) {
 			bound = binding.AccountID
 		}
+	}
+	if bound == "" {
+		bound = pinnedID
 	}
 	key := modelID + "\x00" + bound + "\x00" + strings.Join(slices.Sorted(maps.Keys(excludedAccountIDs)), ",")
 	wake := make(chan struct{}, 1)
@@ -531,6 +550,9 @@ func (p *AccountPool) leaveQueue(key string, wake chan struct{}) {
 	defer p.mu.Unlock()
 	waiters := p.queues[key]
 	index := slices.Index(waiters, wake)
+	if index < 0 {
+		return
+	}
 	waiters = slices.Delete(waiters, index, index+1)
 	if len(waiters) == 0 {
 		delete(p.queues, key)
@@ -1292,6 +1314,22 @@ func (p *AccountPool) entry(accountID string) *accountEntry {
 		}
 	}
 	return nil
+}
+
+// LookupAccount 零分配查找池中账号的规范 ID、状态与启用标记
+func (p *AccountPool) LookupAccount(accountID string) (id string, state string, enabled bool, ok bool) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return "", "", false, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, entry := range p.entries {
+		if entry.AccountID == accountID || strings.EqualFold(entry.AccountID, accountID) {
+			return entry.AccountID, entry.State, entry.State != StateDisabled, true
+		}
+	}
+	return "", "", false, false
 }
 
 func (p *AccountPool) cleanupSessions(now time.Time) {

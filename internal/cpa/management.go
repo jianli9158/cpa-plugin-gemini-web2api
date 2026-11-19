@@ -105,6 +105,8 @@ func (p *Plugin) handleManagementRegister() (any, error) {
 			{Method: http.MethodGet, Path: "/v0/management/gemini-web2api/status", Description: "Get Gemini-Web2API runtime status, accounts, models, guest session, and cooldowns"},
 			{Method: http.MethodPost, Path: "/v0/management/gemini-web2api/service/start", Description: "Start Gemini-Web2API generation service"},
 			{Method: http.MethodPost, Path: "/v0/management/gemini-web2api/service/stop", Description: "Stop Gemini-Web2API generation service"},
+			{Method: http.MethodPost, Path: "/v0/management/gemini-web2api/guest/relaunch", Description: "Start or relaunch anonymous Gemini Web guest session"},
+			{Method: http.MethodPost, Path: "/v0/management/gemini-web2api/guest/stop", Description: "Stop anonymous Gemini Web guest session"},
 			{Method: http.MethodGet, Path: "/v0/management/gemini-web2api/accounts", Description: "List Gemini-Web2API accounts"},
 			{Method: http.MethodPost, Path: "/v0/management/gemini-web2api/accounts", Description: "Import Gemini-Web2API account from Cookie header, Netscape cookies.txt, or StorageState JSON"},
 			{Method: http.MethodPost, Path: "/v0/management/gemini-web2api/accounts/login-browser", Description: "Launch local Chrome Incognito window to sign in to Google Gemini Web and auto-import account"},
@@ -222,6 +224,14 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		}
 		return p.buildStatusManagementResponse(rt), nil
 
+
+	case method == http.MethodPost && path == "/v0/management/gemini-web2api/guest/relaunch":
+		rt.Accounts.RelaunchGuest()
+		return p.buildStatusManagementResponse(rt), nil
+
+	case method == http.MethodPost && path == "/v0/management/gemini-web2api/guest/stop":
+		rt.Accounts.StopGuest()
+		return p.buildStatusManagementResponse(rt), nil
 	case method == http.MethodGet && path == "/v0/management/gemini-web2api/accounts":
 		views, _ := p.buildAccountsAndCooldowns(rt)
 		return jsonManagementResponse(http.StatusOK, map[string]any{"accounts": views}), nil
@@ -453,6 +463,7 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 				}
 			}
 		}
+		p.notifyHostCooldownReset(req.HostCallbackID, "", accountID, scope)
 		return jsonManagementResponse(http.StatusOK, map[string]any{"cleared": true, "account_id": accountID}), nil
 
 	case method == http.MethodGet && path == "/v0/management/gemini-web2api/models":
@@ -554,6 +565,12 @@ func (p *Plugin) buildStatusManagementResponse(rt *app.PluginRuntime) pluginapi.
 		stateStr = "STOPPED"
 	}
 	guestState := "disabled"
+	busyCount := 0
+	for _, acc := range poolStatus.Accounts {
+		if acc.Pending > 0 {
+			busyCount++
+		}
+	}
 	if poolStatus.Guest != nil {
 		guestState = poolStatus.Guest.State
 	}
@@ -568,7 +585,7 @@ func (p *Plugin) buildStatusManagementResponse(rt *app.PluginRuntime) pluginapi.
 			"accounts": map[string]any{
 				"total":         poolStatus.Total,
 				"ready":         poolStatus.Available,
-				"busy":          0,
+				"busy":          busyCount,
 				"cooldown":      poolStatus.CoolingDown,
 				"initializing":  poolStatus.Initializing,
 				"auth_required": poolStatus.AuthRequired,

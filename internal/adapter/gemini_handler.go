@@ -431,7 +431,7 @@ func buildGeminiPrompt(c *gin.Context, client *gemini.Client, request GeminiGene
 	toolNames := geminiToolNames(request.Contents)
 	contents := request.Contents
 	if continuation {
-		for index := len(contents) - 1; index >= 0; index-- {
+		for index := len(contents) - 2; index >= 0; index-- {
 			if contents[index].Role == "model" {
 				contents = contents[index+1:]
 				break

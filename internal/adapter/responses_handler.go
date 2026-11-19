@@ -39,6 +39,7 @@ type ResponsesTool struct {
 	Quality           string          `json:"quality,omitempty"`
 	Size              string          `json:"size,omitempty"`
 	Format            json.RawMessage `json:"format,omitempty"`
+	Execution         string          `json:"execution,omitempty"`
 	Tools             []ResponsesTool `json:"tools,omitempty"`
 	Filters           json.RawMessage `json:"filters,omitempty"`
 	UserLocation      json.RawMessage `json:"user_location,omitempty"`
@@ -331,6 +332,8 @@ func responsesMessages(raw json.RawMessage, definitions []ToolDefinition) ([]Cha
 			Actions   json.RawMessage `json:"actions"`
 			Operation json.RawMessage `json:"operation"`
 			Status    string          `json:"status"`
+			Execution string          `json:"execution"`
+			Tools     json.RawMessage `json:"tools"`
 		}
 		if err := json.Unmarshal(item, &envelope); err != nil {
 			return nil, err
@@ -341,12 +344,7 @@ func responsesMessages(raw json.RawMessage, definitions []ToolDefinition) ([]Cha
 		case "function_call_output":
 			messages = append(messages, ChatMessage{Role: "tool", Content: envelope.Output, ToolCallID: envelope.CallID})
 		case "function_call":
-			var arguments string
-			if len(envelope.Arguments) > 0 {
-				if err := json.Unmarshal(envelope.Arguments, &arguments); err != nil {
-					return nil, fmt.Errorf("function_call.arguments: %w", err)
-				}
-			}
+			arguments := rawStringOrObject(envelope.Arguments)
 			messages = append(messages, ChatMessage{Role: "assistant", ToolCalls: []OpenAIToolCall{responsesPriorToolCall(envelope.CallID, qualified(envelope.Namespace, envelope.Name), arguments)}})
 		case "custom_tool_call", "local_shell_call", "shell_call", "apply_patch_call":
 			name, arguments := responsesClientCall(envelope.Type, envelope.Input, envelope.Action, envelope.Operation)
@@ -384,7 +382,28 @@ func responsesMessages(raw json.RawMessage, definitions []ToolDefinition) ([]Cha
 			if index != len(items)-1 {
 				return nil, fmt.Errorf("compaction_trigger 必须是最后一个输入项")
 			}
-		case "code_interpreter_call", "web_search_call", "file_search_call", "mcp_call", "mcp_list_tools", "mcp_approval_request", "tool_search_call", "tool_search_output", "program", "program_output":
+		case "tool_search_call":
+			if envelope.Execution == "server" {
+				messages = append(messages, ChatMessage{Role: "assistant", TranscriptItems: []json.RawMessage{append(json.RawMessage(nil), item...)}})
+				continue
+			}
+			name := cmp.Or(envelope.Name, "tool_search")
+			messages = append(messages, ChatMessage{Role: "assistant", ToolCalls: []OpenAIToolCall{responsesPriorToolCall(cmp.Or(envelope.CallID, envelope.ID), qualified(envelope.Namespace, name), rawStringOrObject(envelope.Arguments))}})
+		case "tool_search_output":
+			if envelope.Execution == "server" {
+				messages = append(messages, ChatMessage{Role: "assistant", TranscriptItems: []json.RawMessage{append(json.RawMessage(nil), item...)}})
+				continue
+			}
+			output := envelope.Output
+			if len(output) == 0 || string(output) == "null" {
+				if len(envelope.Tools) > 0 && string(envelope.Tools) != "null" {
+					output, _ = json.Marshal(gin.H{"tools": json.RawMessage(envelope.Tools)})
+				} else {
+					output = json.RawMessage(`"{}"`)
+				}
+			}
+			messages = append(messages, ChatMessage{Role: "tool", Content: toolOutputContent(output), ToolCallID: cmp.Or(envelope.CallID, envelope.ID)})
+		case "code_interpreter_call", "web_search_call", "file_search_call", "mcp_call", "mcp_list_tools", "mcp_approval_request", "program", "program_output":
 			messages = append(messages, ChatMessage{Role: "assistant", TranscriptItems: []json.RawMessage{append(json.RawMessage(nil), item...)}})
 		case "mcp_approval_response":
 			messages = append(messages, ChatMessage{Role: "user", TranscriptItems: []json.RawMessage{append(json.RawMessage(nil), item...)}})
@@ -490,6 +509,10 @@ func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
 			bridge.Definitions = append(bridge.Definitions, responsesClientTools[tool.Type])
 		case "computer", "computer_use_preview":
 			bridge.Definitions = append(bridge.Definitions, computerToolDefinition(tool))
+		case "tool_search":
+			if tool.Execution == "client" || (tool.Execution != "server" && len(tool.Parameters) > 0 && string(tool.Parameters) != "null") {
+				bridge.Definitions = append(bridge.Definitions, toolSearchDefinition(tool))
+			}
 		case "namespace":
 			for _, inner := range tool.Tools {
 				if inner.Type != "function" && inner.Type != "custom" {
@@ -510,7 +533,7 @@ func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
 		case "image_generation":
 			bridge.ImageGeneration = true
 			bridge.AspectRatio = tool.Size
-		case "file_search", "mcp", "tool_search", "programmatic_tool_calling":
+		case "file_search", "mcp", "programmatic_tool_calling":
 		default:
 			return ToolBridge{}, fmt.Errorf("不支持的 Responses 工具 %q", tool.Type)
 		}

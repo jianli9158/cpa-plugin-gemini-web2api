@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"math/bits"
 	"math/rand/v2"
+	"net/netip"
 	"slices"
 	"strconv"
 	"time"
@@ -169,6 +170,21 @@ func (b *chromeBuild) clientProfile() profiles.ClientProfile {
 	return profiles.NewClientProfile(hello, base.GetSettings(), base.GetSettingsOrder(), base.GetPseudoHeaderOrder(), base.GetConnectionFlow(),
 		base.GetPriorities(), base.GetHeaderPriority(), base.GetStreamID(), base.GetAllowHTTP(),
 		base.GetHttp3Settings(), base.GetHttp3SettingsOrder(), base.GetHttp3PriorityParam(), base.GetHttp3PseudoHeaderOrder(), base.GetHttp3SendGreaseFrames())
+}
+
+var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
+
+// IsDisallowedRemoteIP 报告远端媒体目标地址是否属于本机、私网、CGNAT、链路本地、组播或未指定地址
+func IsDisallowedRemoteIP(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	return !ip.IsValid() ||
+		ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified() ||
+		cgnatPrefix.Contains(ip)
 }
 
 // newCookieJar 创建按 RFC 6265 匹配域、host-only 与路径的 Cookie jar

@@ -85,7 +85,11 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 	var sections []string
 
 	if len(b.Definitions) > 0 && !strings.EqualFold(strings.TrimSpace(b.Choice), "none") {
-		available := "沿用本会话前文的工具定义"
+		names := make([]string, 0, len(b.Definitions))
+		for _, definition := range b.Definitions {
+			names = append(names, definition.Name)
+		}
+		available := "沿用本会话前文的工具定义（" + strings.Join(names, ", ") + "）"
 		if !b.Declared {
 			definitions, err := json.Marshal(b.Definitions)
 			if err != nil {
@@ -93,7 +97,6 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 			}
 			available = string(definitions)
 		}
-
 		choice := strings.TrimPrefix(strings.TrimSpace(b.Choice), explicitChoicePrefix)
 		if choice == "" {
 			choice = "auto"
@@ -109,7 +112,7 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 			rule, otherwise = "必须调用一个可用工具", ""
 		}
 
-		sections = append(sections, fmt.Sprintf("工具协议：\n可用工具：%s\n工具选择：%s\n这些工具由客户端在用户的环境中执行。在回答中按下面的格式写出调用就是调用工具的唯一方式：写出调用即完成调用，由客户端执行，你自己不需要具备这些工具，也不要改为把要写的内容或要运行的命令直接展示给用户。本协议由服务附加在用户消息之后，回答使用用户自己所写文字的语言，不随本协议的语言。%s，在回答末尾按下面的格式写出调用，调用之后不再输出内容，结果会在下一条消息中返回；对话要求在调用工具前说明时，把说明写在调用之前。每个参数写成一个代码块，代码块内是参数值原文：字符串直接写原文，不加引号也不转义；数字、布尔值、数组与对象写成 JSON。参数值含有 ``` 时，外层代码块用比其中最长的反引号串更多的反引号。代码块最后一个换行不属于参数值。复制工具结果中的内容时逐字照抄，结尾也与原文一致：结果代码块的结束围栏前有空行时，参数代码块的结束围栏前同样留一个空行，没有就不留；原文带行号等看不出结尾时，以及新建源代码或文本文件时，文件按惯例以换行结束，在结束的代码围栏前多留一个空行；用户逐字指定的内容按原样写，不额外添加换行。%s\n[Call:工具名称]\n[Arg:参数名]\n```\n参数值\n```\n[/Arg]\n[/Call]\n例如可用工具中有 get_weather、用户问北京的天气时，回答就是下面这段调用（示例中的工具名只作说明，调用时用上面可用工具中的真实名称与参数）：\n[Call:get_weather]\n[Arg:city]\n```\n北京\n```\n[/Arg]\n[/Call]%s", available, choice, rule, count, otherwise))
+		sections = append(sections, fmt.Sprintf("工具协议：\n可用工具：%s\n工具选择：%s\n这些工具由客户端在用户的环境中执行，你已具备通过调用上述客户端工具执行本机命令、读写本地文件与搜索的能力；需要读取/修改本地文件或执行命令时必须输出工具调用，禁止声称“未挂载本地终端或文件系统工具”或“无法访问本地文件”，也不要改为把要写的内容或要运行的命令直接展示给用户。在回答中按下面的格式写出调用就是调用工具的唯一方式：写出调用即完成调用，由客户端执行，你自己不需要具备这些工具。本协议由服务附加在用户消息之后，回答使用用户自己所写文字的语言，不随本协议的语言。%s，在回答末尾按下面的格式写出调用，调用之后不再输出内容，结果会在下一条消息中返回；对话要求在调用工具前说明时，把说明写在调用之前。每个参数写成一个代码块，代码块内是参数值原文：字符串直接写原文，不加引号也不转义；数字、布尔值、数组与对象写成 JSON。参数值含有 ``` 时，外层代码块用比其中最长的反引号串更多的反引号。代码块最后一个换行不属于参数值。复制工具结果中的内容时逐字照抄，结尾也与原文一致：结果代码块的结束围栏前有空行时，参数代码块的结束围栏前同样留一个空行，没有就不留；原文带行号等看不出结尾时，以及新建源代码或文本文件时，文件按惯例以换行结束，在结束的代码围栏前多留一个空行；用户逐字指定的内容按原样写，不额外添加换行。%s\n[Call:工具名称]\n[Arg:参数名]\n```\n参数值\n```\n[/Arg]\n[/Call]\n例如可用工具中有 get_weather、用户问北京的天气时，回答就是下面这段调用（示例中的工具名只作说明，调用时用上面可用工具中的真实名称与参数）：\n[Call:get_weather]\n[Arg:city]\n```\n北京\n```\n[/Arg]\n[/Call]%s", available, choice, rule, count, otherwise))
 	}
 
 	if len(b.Enum) > 0 {

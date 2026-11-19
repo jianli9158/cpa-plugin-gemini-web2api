@@ -200,7 +200,7 @@ func decodeImagePart(ctx context.Context, part map[string]json.RawMessage, clien
 		return "\n" + imageURL + "\n", nil, nil
 	}
 	if imageURL != "" && !strings.HasPrefix(imageURL, "data:") {
-		data, err := fetchRemoteMedia(ctx, client, imageURL)
+		data, err := fetchRemoteImage(ctx, client, imageURL)
 		if err != nil {
 			return "", nil, fmt.Errorf("下载远程图片失败: %w", err)
 		}
@@ -219,7 +219,7 @@ func decodeImagePart(ctx context.Context, part map[string]json.RawMessage, clien
 		imageURL = source.URL
 	}
 	if imageURL != "" && !strings.HasPrefix(imageURL, "data:") {
-		data, err := fetchRemoteMedia(ctx, client, imageURL)
+		data, err := fetchRemoteImage(ctx, client, imageURL)
 		if err != nil {
 			return "", nil, fmt.Errorf("下载远程图片失败: %w", err)
 		}

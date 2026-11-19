@@ -395,7 +395,7 @@ func ClaudeCountTokensHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.ClaudeRequest, continuation bool, bridge ToolBridge) (string, []gemini.FileData, error) {
 	messages := request.Messages
 	if continuation {
-		for index := len(messages) - 1; index >= 0; index-- {
+		for index := len(messages) - 2; index >= 0; index-- {
 			if messages[index].Role == "assistant" {
 				messages = messages[index+1:]
 				break

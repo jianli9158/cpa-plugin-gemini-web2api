@@ -11,6 +11,7 @@ endif
 
 OUT_DIR := dist/plugins/$(GOOS)/$(GOARCH)
 OUT_FILE := $(OUT_DIR)/gemini-web2api$(EXT)
+CPA_PLUGIN_DIR ?= $(HOME)/.cli-proxy-api/plugins/$(GOOS)/$(GOARCH)
 
 .PHONY: all build test install clean
 
@@ -23,10 +24,11 @@ build:
 
 test:
 	CGO_ENABLED=1 \
-	go vet ./... && go test -v ./internal/cpa/... ./internal/proxydial/...
+	go vet ./... && go test -v ./...
 
 install: build
-	cp -f $(OUT_FILE) "/Users/jianli/Library/Application Support/com.cpa.gui/cpa-core/plugins/darwin/arm64/gemini-web2api.dylib"
+	mkdir -p "$(CPA_PLUGIN_DIR)"
+	cp -f $(OUT_FILE) "$(CPA_PLUGIN_DIR)/gemini-web2api$(EXT)"
 
 clean:
 	rm -rf dist

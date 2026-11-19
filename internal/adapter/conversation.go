@@ -6,7 +6,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
@@ -23,6 +22,7 @@ type conversationRegistry struct {
 	store  *requestdb.Store
 	// temporary 为不写入网页历史的账号以普通会话发送的会话，键为 CID，不再被续接后从网页历史删除
 	temporary map[string]temporaryChat
+	pruning   atomic.Bool
 	mu        sync.Mutex
 }
 
@@ -329,9 +329,16 @@ func (r *conversationRegistry) cleanupLocked(now time.Time) {
 			delete(r.states, key)
 		}
 	}
+	maxTempAge := max(2*r.ttl, 2*time.Hour)
+	for cid, chat := range r.temporary {
+		if now.Sub(chat.touched) > maxTempAge {
+			delete(r.temporary, cid)
+		}
+	}
 	r.lastGC = now
-	if store := r.store; store != nil {
+	if store := r.store; store != nil && r.pruning.CompareAndSwap(false, true) {
 		go func() {
+			defer r.pruning.Store(false)
 			if err := store.PruneSessions(context.Background(), now); err != nil {
 				logging.Warn(logging.SourceService, "清理会话失败", "错误", err)
 			}

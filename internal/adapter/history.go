@@ -38,6 +38,9 @@ func historyKeys(system string, bridge ToolBridge, turns []historyTurn, replies 
 	if bridge.disallowsHostedTools() {
 		tools = nil
 	}
+	if turns == nil {
+		turns = []historyTurn{}
+	}
 	data, _ := json.Marshal(struct {
 		System string           `json:"s"`
 		Tools  []ToolDefinition `json:"d,omitempty"`
@@ -65,7 +68,7 @@ func continuedHistoryKey(system string, bridge ToolBridge, turns []historyTurn) 
 	if !continueSession.Load() {
 		return ""
 	}
-	for index := len(turns) - 1; index > 0; index-- {
+	for index := len(turns) - 2; index > 0; index-- {
 		if turns[index].Role != "assistant" {
 			continue
 		}

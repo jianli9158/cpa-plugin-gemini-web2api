@@ -65,11 +65,11 @@ Open the CLIProxyAPI Management Center (or EasyCLIProxyAPI desktop app), navigat
 
 ### Option 2: Download Prebuilt Binary from GitHub Releases
 1. Download the archive for your platform from [Releases](https://github.com/jianli9158/cpa-plugin-gemini-web2api/releases):
-   - macOS Apple Silicon: `gemini-web2api_1.0.4_darwin_arm64.zip`
-   - macOS Intel: `gemini-web2api_1.0.4_darwin_amd64.zip`
-   - Linux x86_64: `gemini-web2api_1.0.4_linux_amd64.zip`
-   - Linux ARM64: `gemini-web2api_1.0.4_linux_arm64.zip`
-   - Windows x86_64: `gemini-web2api_1.0.4_windows_amd64.zip`
+   - macOS Apple Silicon: `gemini-web2api_1.0.8_darwin_arm64.zip`
+   - macOS Intel: `gemini-web2api_1.0.8_darwin_amd64.zip`
+   - Linux x86_64: `gemini-web2api_1.0.8_linux_amd64.zip`
+   - Linux ARM64: `gemini-web2api_1.0.8_linux_arm64.zip`
+   - Windows x86_64: `gemini-web2api_1.0.8_windows_amd64.zip`
 2. Extract the dynamic library (`gemini-web2api.dylib` / `gemini-web2api.so` / `gemini-web2api.dll`) into CLIProxyAPI's plugin directory:
    ```text
    plugins/<goos>/<goarch>/gemini-web2api.{dylib,so,dll}

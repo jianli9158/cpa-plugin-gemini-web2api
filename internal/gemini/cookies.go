@@ -109,6 +109,8 @@ func normalizeCookie(cookie Cookie, requestHost string) Cookie {
 	cookie.Domain = strings.ToLower(strings.TrimSpace(cookie.Domain))
 	if cookie.Domain == "" {
 		cookie.Domain = strings.ToLower(requestHost)
+	} else if cookie.Domain == "google.com" && !strings.HasPrefix(cookie.Name, "__Host-") {
+		cookie.Domain = ".google.com"
 	}
 	if cookie.Path == "" {
 		cookie.Path = "/"
