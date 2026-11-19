@@ -277,8 +277,10 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 		return nil, err
 	}
 
-	// If no StreamID was supplied or fake_stream is enabled, collect chunks synchronously.
-	if strings.TrimSpace(req.StreamID) == "" || p.hostCall == nil || boolOrDefault(p.Config().FakeStream, false) {
+	// Only buffer inline when no StreamID or host callback is available; when streaming to the host,
+	// adapter.SetResponseModes(..., FakeStream) handles content buffering while liveStreamResponseWriter
+	// returns headers first so host.stream.emit cannot deadlock on the host's bounded stream queue.
+	if strings.TrimSpace(req.StreamID) == "" || p.hostCall == nil {
 		defer cancelStream()
 		rec := httptest.NewRecorder()
 		rt.Handler.ServeHTTP(rec, httpReq)
@@ -287,19 +289,9 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 		if resp.StatusCode >= 400 {
 			return nil, extractHTTPError(resp.StatusCode, resp.Header, respBody)
 		}
-		chunks := splitSSEChunks(respBody)
-		if strings.TrimSpace(req.StreamID) != "" && p.hostCall != nil {
-			for _, ch := range chunks {
-				_ = p.emitStreamChunk(req.StreamID, ch.Payload)
-			}
-			_ = p.closeStream(req.StreamID, nil)
-			return rpcExecutorStreamResponse{
-				Headers: cloneHTTPHeader(resp.Header),
-			}, nil
-		}
 		return rpcExecutorStreamResponse{
 			Headers: cloneHTTPHeader(resp.Header),
-			Chunks:  chunks,
+			Chunks:  splitSSEChunks(respBody),
 		}, nil
 	}
 
@@ -316,8 +308,8 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 					_, _ = sw.errBuf.WriteString(msg)
 				}
 			}
-			cancelStream()
 			sw.finishHandler(panicErr)
+			cancelStream()
 		}()
 		rt.Handler.ServeHTTP(sw, httpReq)
 	}()
@@ -434,6 +426,7 @@ func (w *liveStreamResponseWriter) finishHandler(streamErr *pluginabi.Error) {
 		select {
 		case <-w.rpcReturned:
 			_ = w.plugin.closeStream(w.streamID, nil)
+		case <-w.ctx.Done():
 		case <-w.plugin.ctx.Done():
 		}
 	}

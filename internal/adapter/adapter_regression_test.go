@@ -92,3 +92,24 @@ func TestStopCutterMultiByteUTF8AcrossChunks(t *testing.T) {
 		t.Fatalf("chunk 3: got (%q, %v), want (%q, true)", delta3, matched3, "完美")
 	}
 }
+
+func TestFakeStreamProjectionBuffersThoughtAndText(t *testing.T) {
+	prev := fakeStream.Swap(true)
+	defer fakeStream.Store(prev)
+
+	proj := newStreamProjection(ToolBridge{}, true)
+	var emitted []gemini.Event
+	emit := func(ev gemini.Event) error {
+		emitted = append(emitted, ev)
+		return nil
+	}
+	if err := proj.project(gemini.Event{Kind: gemini.EventThought, Delta: "thinking...", Operation: gemini.SnapshotAppend}, emit); err != nil {
+		t.Fatalf("project thought failed: %v", err)
+	}
+	if err := proj.project(gemini.Event{Kind: gemini.EventText, Delta: "hello", Operation: gemini.SnapshotAppend}, emit); err != nil {
+		t.Fatalf("project text failed: %v", err)
+	}
+	if len(emitted) != 0 {
+		t.Fatalf("expected fake_stream=true to buffer live thought/text deltas, got %+v", emitted)
+	}
+}

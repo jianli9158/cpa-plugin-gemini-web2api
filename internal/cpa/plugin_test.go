@@ -2,12 +2,15 @@ package cpa_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/cpa"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/pluginabi"
@@ -43,8 +46,8 @@ func TestPluginLifecycleAndCapabilities(t *testing.T) {
 	if !strings.Contains(string(regJSON), `"Name":"gemini-web2api"`) {
 		t.Fatalf("unexpected registration metadata: %s", string(regJSON))
 	}
-	if !strings.Contains(string(regJSON), `"Version":"1.0.8"`) || !strings.Contains(string(regJSON), `"continue_session"`) {
-		t.Fatalf("expected version 1.0.8 and continue_session config field: %s", string(regJSON))
+	if !strings.Contains(string(regJSON), `"Version":"1.0.9"`) || !strings.Contains(string(regJSON), `"continue_session"`) {
+		t.Fatalf("expected version 1.0.9 and continue_session config field: %s", string(regJSON))
 	}
 	if !strings.Contains(string(regJSON), `"executor":true`) || !strings.Contains(string(regJSON), `"auth_provider":true`) {
 		t.Fatalf("missing expected capabilities: %s", string(regJSON))
@@ -580,6 +583,176 @@ func TestRouteUnprefixedModelsAndHostCallbacks(t *testing.T) {
 	}
 	if guestStopRes.(pluginapi.ManagementResponse).StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 from guest/stop, got %d", guestStopRes.(pluginapi.ManagementResponse).StatusCode)
+	}
+}
+
+func TestExecutorExecuteStreamFakeStreamDoesNotDeadlockOver16Chunks(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	const (
+		hostQueueCap = 16
+		totalChunks  = 30
+	)
+
+	type streamBridge struct {
+		mu       sync.Mutex
+		cond     *sync.Cond
+		draining bool
+		closed   bool
+		queue    [][]byte
+		emitted  [][]byte
+	}
+	bridge := &streamBridge{}
+	bridge.cond = sync.NewCond(&bridge.mu)
+
+	p := cpa.NewPlugin(func(method string, payload []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodHostStreamEmit:
+			var req struct {
+				StreamID string `json:"stream_id"`
+				Payload  []byte `json:"payload"`
+			}
+			if err := json.Unmarshal(payload, &req); err != nil {
+				return nil, err
+			}
+			bridge.mu.Lock()
+			for !bridge.draining && len(bridge.queue) >= hostQueueCap && !bridge.closed {
+				bridge.cond.Wait()
+			}
+			if bridge.draining {
+				bridge.emitted = append(bridge.emitted, append([]byte(nil), req.Payload...))
+			} else {
+				bridge.queue = append(bridge.queue, append([]byte(nil), req.Payload...))
+			}
+			bridge.mu.Unlock()
+		case pluginabi.MethodHostStreamClose:
+			bridge.mu.Lock()
+			bridge.closed = true
+			bridge.cond.Broadcast()
+			bridge.mu.Unlock()
+		}
+		return json.Marshal(pluginabi.Envelope{OK: true, Result: json.RawMessage(`{}`)})
+	})
+	defer func() {
+		bridge.mu.Lock()
+		bridge.closed = true
+		bridge.cond.Broadcast()
+		bridge.mu.Unlock()
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, []byte(`{}`))
+	}()
+
+	cfgYAML := []byte("data_dir: " + filepath.ToSlash(tmpDir) + "\nauto_start: false\nguest_enabled: false\nfake_stream: true\n")
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    cfgYAML,
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq); err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+	rt, err := p.Runtime()
+	if err != nil {
+		t.Fatalf("Runtime() failed: %v", err)
+	}
+
+	rt.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/responses" && r.Header.Get("X-Test-Error") == "429" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"rate limited"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		for i := range totalChunks {
+			_, _ = fmt.Fprintf(w, "event: response.output_text.delta\ndata: {\"seq\":%d}\n\n", i)
+		}
+	})
+
+	streamReq, _ := json.Marshal(map[string]any{
+		"stream_id": "stream-over-16",
+		"model":     "gemini-4-neon",
+		"format":    "openai-responses",
+		"payload":   []byte(`{"model":"gemini-4-neon","input":"hi","stream":true}`),
+	})
+
+	type execResult struct {
+		res any
+		err error
+	}
+	done := make(chan execResult, 1)
+	go func() {
+		res, execErr := p.HandleMethod(pluginabi.MethodExecutorExecuteStream, streamReq)
+		done <- execResult{res: res, err: execErr}
+	}()
+
+	select {
+	case out := <-done:
+		if out.err != nil {
+			t.Fatalf("executor.execute_stream failed: %v", out.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("executor.execute_stream deadlocked before returning headers with fake_stream=true and >16 chunks")
+	}
+
+	// Start host stream consumption only AFTER executor.execute_stream returns, matching CPA streamBridgeStream.
+	bridge.mu.Lock()
+	bridge.draining = true
+	bridge.emitted = append(bridge.emitted, bridge.queue...)
+	bridge.queue = nil
+	bridge.cond.Broadcast()
+	deadline := time.Now().Add(3 * time.Second)
+	for !bridge.closed && time.Now().Before(deadline) {
+		bridge.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+		bridge.mu.Lock()
+	}
+	closed := bridge.closed
+	gotCount := len(bridge.emitted)
+	bridge.mu.Unlock()
+
+	if !closed {
+		t.Fatalf("expected host.stream.close after draining, got closed=%v emitted=%d", closed, gotCount)
+	}
+	if gotCount != totalChunks {
+		t.Fatalf("expected %d emitted SSE chunks, got %d", totalChunks, gotCount)
+	}
+
+	// Fallback without StreamID must still return inline chunks cleanly.
+	inlineReq, _ := json.Marshal(map[string]any{
+		"model":   "gemini-4-neon",
+		"format":  "openai-responses",
+		"payload": []byte(`{"model":"gemini-4-neon","input":"hi","stream":true}`),
+	})
+	inlineRes, err := p.HandleMethod(pluginabi.MethodExecutorExecuteStream, inlineReq)
+	if err != nil {
+		t.Fatalf("inline executor.execute_stream failed: %v", err)
+	}
+	inlineJSON, _ := json.Marshal(inlineRes)
+	var parsedInline struct {
+		Chunks []pluginapi.ExecutorStreamChunk `json:"chunks"`
+	}
+	if err := json.Unmarshal(inlineJSON, &parsedInline); err != nil {
+		t.Fatalf("unmarshal inline response: %v", err)
+	}
+	if len(parsedInline.Chunks) != totalChunks {
+		t.Fatalf("expected %d inline chunks when stream_id is empty, got %d", totalChunks, len(parsedInline.Chunks))
+	}
+
+	// Pre-header error under fake_stream=true must still propagate as HTTP error.
+	errReq, _ := json.Marshal(map[string]any{
+		"stream_id": "stream-err-429",
+		"model":     "gemini-4-neon",
+		"format":    "openai-responses",
+		"headers":   map[string][]string{"X-Test-Error": {"429"}},
+		"payload":   []byte(`{"model":"gemini-4-neon","input":"hi","stream":true}`),
+	})
+	_, err = p.HandleMethod(pluginabi.MethodExecutorExecuteStream, errReq)
+	if err == nil {
+		t.Fatal("expected error for 429 response")
+	}
+	pluginErr, ok := err.(*pluginabi.Error)
+	if !ok || pluginErr.HTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("expected *pluginabi.Error with status 429, got %T: %v", err, err)
 	}
 }
 
