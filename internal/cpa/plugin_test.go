@@ -46,8 +46,8 @@ func TestPluginLifecycleAndCapabilities(t *testing.T) {
 	if !strings.Contains(string(regJSON), `"Name":"gemini-web2api"`) {
 		t.Fatalf("unexpected registration metadata: %s", string(regJSON))
 	}
-	if !strings.Contains(string(regJSON), `"Version":"1.0.9"`) || !strings.Contains(string(regJSON), `"continue_session"`) {
-		t.Fatalf("expected version 1.0.9 and continue_session config field: %s", string(regJSON))
+	if !strings.Contains(string(regJSON), `"Version":"1.0.10"`) || !strings.Contains(string(regJSON), `"continue_session"`) {
+		t.Fatalf("expected version 1.0.10 and continue_session config field: %s", string(regJSON))
 	}
 	if !strings.Contains(string(regJSON), `"executor":true`) || !strings.Contains(string(regJSON), `"auth_provider":true`) {
 		t.Fatalf("missing expected capabilities: %s", string(regJSON))
@@ -753,6 +753,166 @@ func TestExecutorExecuteStreamFakeStreamDoesNotDeadlockOver16Chunks(t *testing.T
 	pluginErr, ok := err.(*pluginabi.Error)
 	if !ok || pluginErr.HTTPStatus != http.StatusTooManyRequests {
 		t.Fatalf("expected *pluginabi.Error with status 429, got %T: %v", err, err)
+	}
+}
+
+func TestExecutorStreamInjectsChatIncludeUsage(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := cpa.NewPlugin(func(method string, payload []byte) ([]byte, error) {
+		return json.Marshal(pluginabi.Envelope{OK: true, Result: json.RawMessage(`{}`)})
+	})
+	defer func() {
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, []byte(`{}`))
+	}()
+
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+	cfgYAML := []byte("data_dir: " + filepath.ToSlash(tmpDir) + "\nauto_start: false\nguest_enabled: false\nsync_auth_files: false\n")
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    cfgYAML,
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq); err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+	rt, err := p.Runtime()
+	if err != nil {
+		t.Fatalf("Runtime() failed: %v", err)
+	}
+
+	var (
+		mu       sync.Mutex
+		lastPath string
+		lastBody []byte
+	)
+	rt.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var buf strings.Builder
+		tmp := make([]byte, 4096)
+		for {
+			n, readErr := r.Body.Read(tmp)
+			if n > 0 {
+				buf.Write(tmp[:n])
+			}
+			if readErr != nil {
+				break
+			}
+		}
+		mu.Lock()
+		lastPath = r.URL.Path
+		lastBody = []byte(buf.String())
+		mu.Unlock()
+
+		if r.URL.Path == "/v1/chat/completions" && strings.Contains(buf.String(), `"stream":false`) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"chatcmpl_1","choices":[]}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	})
+
+	cases := []struct {
+		name              string
+		method            string
+		format            string
+		payload           string
+		wantPath          string
+		wantStreamOptions bool
+		wantIncludeUsage  bool
+	}{
+		{
+			name:              "chat stream omits stream_options -> injects true",
+			method:            pluginabi.MethodExecutorExecuteStream,
+			format:            "openai",
+			payload:           `{"model":"gemini-4-neon","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			wantPath:          "/v1/chat/completions",
+			wantStreamOptions: true,
+			wantIncludeUsage:  true,
+		},
+		{
+			name:              "chat stream empty stream_options -> injects true",
+			method:            pluginabi.MethodExecutorExecuteStream,
+			format:            "chat-completions",
+			payload:           `{"model":"gemini-4-neon","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{}}`,
+			wantPath:          "/v1/chat/completions",
+			wantStreamOptions: true,
+			wantIncludeUsage:  true,
+		},
+		{
+			name:              "chat stream null stream_options -> injects true",
+			method:            pluginabi.MethodExecutorExecuteStream,
+			format:            "openai",
+			payload:           `{"model":"gemini-4-neon","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":null}`,
+			wantPath:          "/v1/chat/completions",
+			wantStreamOptions: true,
+			wantIncludeUsage:  true,
+		},
+		{
+			name:              "chat stream explicit include_usage false -> preserved",
+			method:            pluginabi.MethodExecutorExecuteStream,
+			format:            "openai",
+			payload:           `{"model":"gemini-4-neon","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":false}}`,
+			wantPath:          "/v1/chat/completions",
+			wantStreamOptions: true,
+			wantIncludeUsage:  false,
+		},
+		{
+			name:              "chat non-stream -> does not inject stream_options",
+			method:            pluginabi.MethodExecutorExecute,
+			format:            "openai",
+			payload:           `{"model":"gemini-4-neon","messages":[{"role":"user","content":"hi"}],"stream":false}`,
+			wantPath:          "/v1/chat/completions",
+			wantStreamOptions: false,
+		},
+		{
+			name:              "responses stream -> does not inject stream_options",
+			method:            pluginabi.MethodExecutorExecuteStream,
+			format:            "openai-responses",
+			payload:           `{"model":"gemini-4-neon","input":"hi","stream":true}`,
+			wantPath:          "/v1/responses",
+			wantStreamOptions: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reqRaw, _ := json.Marshal(map[string]any{
+				"model":   "gemini-4-neon",
+				"format":  tc.format,
+				"payload": []byte(tc.payload),
+			})
+			if _, err := p.HandleMethod(tc.method, reqRaw); err != nil {
+				t.Fatalf("%s failed: %v", tc.method, err)
+			}
+			mu.Lock()
+			gotPath := lastPath
+			gotBody := append([]byte(nil), lastBody...)
+			mu.Unlock()
+
+			if gotPath != tc.wantPath {
+				t.Fatalf("expected path %s, got %s", tc.wantPath, gotPath)
+			}
+			var parsed struct {
+				StreamOptions *struct {
+					IncludeUsage bool `json:"include_usage"`
+				} `json:"stream_options"`
+			}
+			if err := json.Unmarshal(gotBody, &parsed); err != nil {
+				t.Fatalf("unmarshal forwarded body %s: %v", string(gotBody), err)
+			}
+			if tc.wantStreamOptions {
+				if parsed.StreamOptions == nil {
+					t.Fatalf("expected stream_options in body, got %s", string(gotBody))
+				}
+				if parsed.StreamOptions.IncludeUsage != tc.wantIncludeUsage {
+					t.Fatalf("expected include_usage=%v, got %v (body=%s)", tc.wantIncludeUsage, parsed.StreamOptions.IncludeUsage, string(gotBody))
+				}
+			} else if parsed.StreamOptions != nil {
+				t.Fatalf("did not expect stream_options in body, got %s", string(gotBody))
+			}
+		})
 	}
 }
 

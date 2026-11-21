@@ -203,6 +203,11 @@ func (p *Plugin) buildInternalHTTPRequest(
 			}
 		}
 	}
+	if targetPath == "/v1/chat/completions" && stream && len(body) > 0 && !gjson.GetBytes(body, "stream_options.include_usage").Exists() {
+		if updated, err := sjson.SetBytes(body, "stream_options.include_usage", true); err == nil {
+			body = updated
+		}
+	}
 
 	fullURL := "http://gemini-web2api.local" + targetPath
 	if encodedQuery := targetQuery.Encode(); encodedQuery != "" {
