@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Mag1cFall/Gemini-Web2API/internal/accounts"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/adapter"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/mcp"
@@ -14,9 +13,8 @@ import (
 
 // Deps 是路由使用的运行期组件
 type Deps struct {
-	Pool     *balancer.AccountPool
-	Store    *requestdb.Store
-	Accounts *accounts.Manager
+	Pool  *balancer.AccountPool
+	Store *requestdb.Store
 }
 
 // NewRouter 注册就绪检查与全部兼容 API（进程内插件 RPC 专用）
@@ -37,6 +35,7 @@ func NewRouter(deps Deps) *gin.Engine {
 	})
 
 	api := router.Group("")
+	api.Use(adapter.DecompressMiddleware())
 	api.Use(adapter.RequestMiddleware(deps.Store))
 	api.POST("/v1/chat/completions", adapter.ChatCompletionHandler(pool))
 	api.POST("/v1/responses", adapter.ResponsesHandler(pool, deps.Store))
@@ -74,6 +73,7 @@ func NewRouter(deps Deps) *gin.Engine {
 	api.DELETE("/v1/files/:file", adapter.GeminiOr(adapter.GeminiFileDeleteHandler(deps.Store), adapter.FileDeleteHandler(deps.Store)))
 	api.GET("/v1/files/:file/content", adapter.FileContentHandler(deps.Store))
 	api.POST("/upload/v1/files", adapter.GeminiFileUploadHandler(deps.Store))
+	api.PUT("/upload/v1/files", adapter.GeminiFileUploadHandler(deps.Store))
 	api.POST("/upload/v1beta/files", adapter.GeminiFileUploadHandler(deps.Store))
 	api.PUT("/upload/v1beta/files", adapter.GeminiFileUploadHandler(deps.Store))
 	api.GET("/v1beta/files", adapter.GeminiFileListHandler(deps.Store))

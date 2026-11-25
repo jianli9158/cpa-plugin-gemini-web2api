@@ -98,6 +98,9 @@ func (m *Manager) Settings() Settings {
 
 // Start 登记并启动全部账号与访客会话，返回后首轮初始化全部结束
 func (m *Manager) Start(accounts []auth.LoadedAccount) {
+	for _, account := range accounts {
+		m.proxies.SetFixed(account.ID, fixedProxy(account))
+	}
 	var wait sync.WaitGroup
 	for _, account := range accounts {
 		wait.Add(1)

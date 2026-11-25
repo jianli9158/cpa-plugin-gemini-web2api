@@ -21,12 +21,13 @@ const proxyCheckInterval = 5 * time.Minute
 func (m *Manager) accountProxy(account auth.LoadedAccount) (string, string) {
 	switch fixed := fixedProxy(account); fixed {
 	case "":
+		m.proxies.SetFixed(account.ID, "")
 		return m.poolProxy(account.ID)
 	case proxypool.Direct:
 		m.proxies.Release(account.ID)
 		return "", "direct"
 	default:
-		m.proxies.Release(account.ID)
+		m.proxies.SetFixed(account.ID, fixed)
 		return fixed, "fixed"
 	}
 }

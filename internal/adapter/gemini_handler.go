@@ -431,8 +431,8 @@ func buildGeminiPrompt(c *gin.Context, client *gemini.Client, request GeminiGene
 	toolNames := geminiToolNames(request.Contents)
 	contents := request.Contents
 	if continuation {
-		for index := len(contents) - 2; index >= 0; index-- {
-			if contents[index].Role == "model" {
+		for index := len(contents) - 1; index >= 0; index-- {
+			if contents[index].Role == "model" && index+1 < len(contents) {
 				contents = contents[index+1:]
 				break
 			}
@@ -471,7 +471,8 @@ func buildGeminiPrompt(c *gin.Context, client *gemini.Client, request GeminiGene
 			files = append(files, pageFiles...)
 		}
 	}
-	return renderTranscript(turns, suffix), files, nil
+	prompt, files := transcriptPrompt(turns, suffix, files)
+	return prompt, files, nil
 }
 
 // functionResponseText 按 Gemini 约定返回函数结果原文：output 与 error 字段分别是函数输出与错误详情，两者都没有时整个 response 是输出
@@ -719,17 +720,37 @@ func geminiToolBridge(request GeminiGenerateContentRequest) (ToolBridge, []strin
 			return bridge, nil, err
 		}
 		for field := range rawConfig {
-			if field != "functionCallingConfig" {
-				return bridge, nil, fmt.Errorf("不支持的 toolConfig 字段 %q", field)
+			if field != "functionCallingConfig" && field != "retrievalConfig" {
+				unsupported = append(unsupported, "toolConfig."+field)
 			}
 		}
+		var retrieval struct {
+			LatLng *struct {
+				Latitude  float64 `json:"latitude"`
+				Longitude float64 `json:"longitude"`
+			} `json:"latLng"`
+			LanguageCode string `json:"languageCode"`
+		}
+		if len(rawConfig["retrievalConfig"]) > 0 && string(rawConfig["retrievalConfig"]) != "null" {
+			if err := json.Unmarshal(rawConfig["retrievalConfig"], &retrieval); err != nil {
+				return bridge, nil, err
+			}
+		}
+		if retrieval.LatLng != nil {
+			bridge.SearchLocation = fmt.Sprintf("%g, %g", retrieval.LatLng.Latitude, retrieval.LatLng.Longitude)
+		}
+		if retrieval.LanguageCode != "" {
+			unsupported = append(unsupported, "toolConfig.retrievalConfig.languageCode")
+		}
 		var functionConfig map[string]json.RawMessage
-		if err := json.Unmarshal(rawConfig["functionCallingConfig"], &functionConfig); err != nil {
-			return bridge, nil, err
+		if len(rawConfig["functionCallingConfig"]) > 0 && string(rawConfig["functionCallingConfig"]) != "null" {
+			if err := json.Unmarshal(rawConfig["functionCallingConfig"], &functionConfig); err != nil {
+				return bridge, nil, err
+			}
 		}
 		for field := range functionConfig {
 			if field != "mode" && field != "allowedFunctionNames" {
-				return bridge, nil, fmt.Errorf("不支持的 functionCallingConfig 字段 %q", field)
+				unsupported = append(unsupported, "toolConfig.functionCallingConfig."+field)
 			}
 		}
 		var mode string
@@ -955,6 +976,7 @@ func (w *geminiStreamWriter) fail(status int, statusName string, err error) erro
 	return w.write(gin.H{"error": geminiErrorObject(status, statusName, err.Error(), retryAfterFor(w.c, status))})
 }
 
+// projectGeminiStreamTail 把完整回答改写为流的最后一块：去掉已在流中发出的正文与思考，带思考签名的部分保留为空文本，没有剩余部分时写一个空文本部分，google-genai 的对话历史跳过没有 parts 的块
 func projectGeminiStreamTail(response gin.H, projection *streamProjection) gin.H {
 	candidates, _ := response["candidates"].([]gin.H)
 	for _, candidate := range candidates {
@@ -984,6 +1006,10 @@ func projectGeminiStreamTail(response gin.H, projection *streamProjection) gin.H
 				runes := []rune(text)
 				if remainingTextRunes >= len(runes) {
 					remainingTextRunes -= len(runes)
+					if _, signed := part["thoughtSignature"]; signed {
+						part["text"] = ""
+						filtered = append(filtered, part)
+					}
 					continue
 				}
 				text = string(runes[remainingTextRunes:])
@@ -994,6 +1020,9 @@ func projectGeminiStreamTail(response gin.H, projection *streamProjection) gin.H
 				part["text"] = text
 			}
 			filtered = append(filtered, part)
+		}
+		if len(filtered) == 0 {
+			filtered = append(filtered, gin.H{"text": ""})
 		}
 		content["parts"] = filtered
 	}
@@ -1008,6 +1037,7 @@ func geminiUsage(usage *gemini.Usage) gin.H {
 	}
 }
 
+// mimeTypeToExt 返回附件文件名使用的扩展名，图片、PDF、文本、Office 文档与音视频之外的类型为 .bin
 func mimeTypeToExt(mimeType string) string {
 	switch strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0])) {
 	case "image/png":
@@ -1020,6 +1050,28 @@ func mimeTypeToExt(mimeType string) string {
 		return ".gif"
 	case "application/pdf":
 		return ".pdf"
+	case "text/plain":
+		return ".txt"
+	case "text/markdown":
+		return ".md"
+	case "text/csv":
+		return ".csv"
+	case "application/json":
+		return ".json"
+	case "application/rtf", "text/rtf":
+		return ".rtf"
+	case "application/msword":
+		return ".doc"
+	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+		return ".docx"
+	case "application/vnd.ms-excel":
+		return ".xls"
+	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+		return ".xlsx"
+	case "application/vnd.ms-powerpoint":
+		return ".ppt"
+	case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		return ".pptx"
 	case "audio/wav", "audio/x-wav", "audio/wave":
 		return ".wav"
 	case "audio/mpeg", "audio/mp3":
@@ -1028,6 +1080,12 @@ func mimeTypeToExt(mimeType string) string {
 		return ".ogg"
 	case "audio/flac":
 		return ".flac"
+	case "audio/aac":
+		return ".aac"
+	case "audio/amr":
+		return ".amr"
+	case "audio/aiff":
+		return ".aiff"
 	case "audio/mp4", "audio/m4a", "audio/x-m4a":
 		return ".m4a"
 	case "video/mp4":

@@ -159,25 +159,25 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				if stream.reject() {
 					writeClaudeError(c, upstreamStatus(err), claudeUpstreamType(err), err.Error())
 				} else {
-					_ = processor.EmitErrorType(claudeUpstreamType(err), streamFailure(c, err))
+					_ = processor.EmitErrorType(claudeStreamErrorType(err), streamFailure(c, err))
 				}
 				return
 			}
 			processor.SetModel(result.Model)
 			processor.SetProviderModel(result.ProviderModel)
 			if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
-				_ = processor.EmitError(streamFailure(c, err))
+				_ = processor.EmitErrorType(claudeStreamErrorType(err), streamFailure(c, err))
 				return
 			}
 			primary := result.Accumulator.Primary()
 			if err := validateHostedOutput(primary, bridge); err != nil {
-				_ = processor.EmitError(streamFailure(c, err))
+				_ = processor.EmitErrorType(claudeStreamErrorType(err), streamFailure(c, err))
 				return
 			}
 			rememberHistory(pool, result, system, bridge, turns)
 			content, calls, err := bridge.truncated(result.Truncated).Parse(primary.Text)
 			if err != nil {
-				_ = processor.EmitError(streamFailure(c, err))
+				_ = processor.EmitErrorType(claudeStreamErrorType(err), streamFailure(c, err))
 				return
 			}
 			calls = assignToolCallIDs(calls, responseID)
@@ -395,8 +395,8 @@ func ClaudeCountTokensHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.ClaudeRequest, continuation bool, bridge ToolBridge) (string, []gemini.FileData, error) {
 	messages := request.Messages
 	if continuation {
-		for index := len(messages) - 2; index >= 0; index-- {
-			if messages[index].Role == "assistant" {
+		for index := len(messages) - 1; index >= 0; index-- {
+			if messages[index].Role == "assistant" && index+1 < len(messages) {
 				messages = messages[index+1:]
 				break
 			}
@@ -435,7 +435,8 @@ func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.Cla
 			}
 		}
 	}
-	return renderTranscript(turns, suffix), files, nil
+	prompt, files := transcriptPrompt(turns, suffix, files)
+	return prompt, files, nil
 }
 
 // claudeMessageText 返回消息内容中的文字

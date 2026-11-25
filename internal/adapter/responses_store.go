@@ -430,7 +430,7 @@ func (w *responseSequenceWriter) replayOutput(response gin.H) error {
 	if response["status"] == "failed" {
 		return w.emit("response.failed", gin.H{"response": response})
 	}
-	return w.finishProjected(response, NewEventAccumulator(), &streamProjection{})
+	return w.finishOutput(response)
 }
 
 // ginValue 把 JSON 解码出的对象转为 gin.H、对象数组转为 []gin.H，供流式写出器按创建时的类型读取

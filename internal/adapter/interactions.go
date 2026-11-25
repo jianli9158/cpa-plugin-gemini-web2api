@@ -1,8 +1,8 @@
 package adapter
 
 import (
+	"cmp"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -492,10 +492,13 @@ func (content interactionContent) part() (GeminiPart, []string, error) {
 			return GeminiPart{FileData: &GeminiFileData{MimeType: content.MIMEType, FileURI: content.URI}}, unsupported, nil
 		}
 		mimeType := content.MIMEType
+		if prefixed, data, ok := splitDataURL(content.Data); ok {
+			mimeType, content.Data = cmp.Or(mimeType, prefixed), data
+		}
 		if mimeType == "" {
 			head := content.Data[:min(len(content.Data), 1024)]
 			head = head[:len(head)/4*4]
-			decoded, err := base64.StdEncoding.DecodeString(head)
+			decoded, err := decodeBase64(head)
 			if err != nil {
 				return GeminiPart{}, nil, fmt.Errorf("%s data is not valid base64: %w", content.Type, err)
 			}

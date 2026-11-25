@@ -2,6 +2,8 @@ package adapter
 
 import (
 	"bytes"
+	"compress/gzip"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -11,7 +13,59 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/requestdb"
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 )
+
+// DecompressMiddleware 按 Content-Encoding 解压 gzip 与 zstd 请求体，解压在处理函数读取请求体时同步进行，请求体上限作用于解压后的字节，请求结束时关闭解压器
+func DecompressMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		encoding := strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Encoding")))
+		if encoding == "" || encoding == "identity" {
+			c.Next()
+			return
+		}
+		var body io.ReadCloser
+		switch encoding {
+		case "gzip", "x-gzip":
+			reader, err := gzip.NewReader(c.Request.Body)
+			if err != nil {
+				writeProtocolError(c, http.StatusBadRequest, fmt.Sprintf("请求体不是有效的 %s 数据：%v", encoding, err))
+				c.Abort()
+				return
+			}
+			body = reader
+		case "zstd":
+			decoder, err := zstd.NewReader(c.Request.Body, zstd.WithDecoderConcurrency(1))
+			if err != nil {
+				writeProtocolError(c, http.StatusBadRequest, fmt.Sprintf("请求体不是有效的 %s 数据：%v", encoding, err))
+				c.Abort()
+				return
+			}
+			body = decoder.IOReadCloser()
+		default:
+			writeProtocolError(c, http.StatusUnsupportedMediaType, fmt.Sprintf("不支持请求体压缩格式 %q，可用 gzip 或 zstd", encoding))
+			c.Abort()
+			return
+		}
+		defer body.Close()
+		c.Request.Body = body
+		c.Request.Header.Del("Content-Encoding")
+		c.Request.ContentLength = -1
+		c.Next()
+	}
+}
+
+// writeProtocolError 按请求所属协议写出错误
+func writeProtocolError(c *gin.Context, status int, message string) {
+	switch {
+	case IsGeminiRequest(c):
+		writeGeminiError(c, status, geminiStatusName(status), message)
+	case strings.HasPrefix(c.Request.URL.Path, "/v1/messages") || c.GetHeader("anthropic-version") != "":
+		writeClaudeError(c, status, claudeErrorType(status), message)
+	default:
+		writeOpenAIError(c, status, "invalid_request", message)
+	}
+}
 
 // RequestMiddleware 为公开 API 请求分配 ID、跟踪生成请求的阶段，结束时输出结果并把生成请求写入账本，首次创建时从账本补入首事件样本
 func RequestMiddleware(store *requestdb.Store) gin.HandlerFunc {
@@ -110,12 +164,24 @@ func thinkingLevelNames(levels []gemini.ThinkingLevel) []string {
 	return names
 }
 
-// IsGeminiRequest 判断请求是否属于 Gemini 协议，/v1 上的请求以模型方法路径或 x-goog-api-key 头识别
+// IsGeminiRequest 判断请求是否属于 Gemini 协议，/v1 上的请求以模型方法路径、x-goog-api-key 头识别，与 OpenAI 共用的模型与文件查询路由上另以不带 Authorization 与 anthropic-version 头的 key 查询参数识别
 func IsGeminiRequest(c *gin.Context) bool {
 	path := c.Request.URL.Path
 	return strings.HasPrefix(path, "/v1beta/") || strings.HasPrefix(path, "/upload/") || strings.HasPrefix(path, "/ws/google.ai.generativelanguage.") ||
 		strings.HasPrefix(path, "/v1/models/") && strings.Contains(path, ":") || strings.HasPrefix(path, "/v1/interactions") || strings.HasPrefix(path, "/v1/cachedContents") ||
-		c.GetHeader("x-goog-api-key") != ""
+		c.GetHeader("x-goog-api-key") != "" || c.Query("key") != "" && c.GetHeader("Authorization") == "" && c.GetHeader("anthropic-version") == "" && sharedGeminiRoute(c)
+}
+
+// sharedGeminiRoute 报告请求是否落在 Gemini 与 OpenAI 共用的路由：GET /v1/models、/v1/models/{id}、/v1/files、/v1/files/{id} 与 DELETE /v1/files/{id}
+func sharedGeminiRoute(c *gin.Context) bool {
+	path := c.Request.URL.Path
+	switch c.Request.Method {
+	case http.MethodGet:
+		return path == "/v1/models" || strings.HasPrefix(path, "/v1/models/") || path == "/v1/files" || strings.HasPrefix(path, "/v1/files/") && strings.Count(path, "/") == 3
+	case http.MethodDelete:
+		return strings.HasPrefix(path, "/v1/files/") && strings.Count(path, "/") == 3
+	}
+	return false
 }
 
 // GeminiOr 在 Gemini 与 OpenAI 共用的路径上按请求协议选择处理函数

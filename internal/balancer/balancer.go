@@ -846,14 +846,19 @@ func failureScope(err error) (bool, string) {
 		return false, "captcha"
 	case errors.Is(err, gemini.ErrModelMismatch):
 		return true, "model_mismatch"
+	case errors.Is(err, gemini.ErrVideoQuota):
+		return true, "usage_limit"
 	case errors.As(err, &protocolErr) && protocolErr.HTTPStatus == 429:
 		return true, "rate_limited"
 	}
 	return false, "upstream_error"
 }
 
-// usageReset 对用量上限与模型降级返回官网已用满的用量窗口的重置时间
+// usageReset 返回用量上限与模型降级对应的冷却截止时刻：视频额度错误优先使用回答给出的重置时刻，其余用量上限与模型降级取官网已用满窗口的重置时刻
 func usageReset(client *gemini.Client, err error) time.Time {
+	if reset := gemini.VideoQuotaReset(err); reset.After(time.Now()) {
+		return reset
+	}
 	var protocolErr *gemini.ProtocolError
 	limited := errors.As(err, &protocolErr) && protocolErr.Code == 1037 || errors.Is(err, gemini.ErrModelMismatch)
 	if !limited {
@@ -1216,35 +1221,6 @@ func errorText(err error) string {
 		return ""
 	}
 	return logging.SanitizeError(err.Error())
-}
-
-// ExcludeNarrowContext 把上下文窗口装不下 tokens 的账号与访客会话加入排除集，返回新增的账号 ID：账号因上下文窗口不足拒绝请求后，调用方据此不再向同样装不下这次请求的其他账号重复上传附件并徒劳发起请求，窗口未知（0）的账号不排除
-func (p *AccountPool) ExcludeNarrowContext(excludedAccountIDs map[string]struct{}, tokens int) []string {
-	if tokens <= 0 {
-		return nil
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	var added []string
-	for _, entry := range p.entries {
-		if entry.Client == nil {
-			continue
-		}
-		if _, excluded := excludedAccountIDs[entry.AccountID]; excluded {
-			continue
-		}
-		if !contextTooNarrow(entry.Client.ContextWindow(), tokens) {
-			continue
-		}
-		excludedAccountIDs[entry.AccountID] = struct{}{}
-		added = append(added, entry.AccountID)
-	}
-	return added
-}
-
-// contextTooNarrow 报告账号的上下文窗口是否装不下 tokens，窗口未知（0）时按未知处理
-func contextTooNarrow(window, tokens int) bool {
-	return window > 0 && tokens > 0 && window < tokens
 }
 
 // nextAvailable 优先在账号中选择，没有可调度的账号时使用访客会话

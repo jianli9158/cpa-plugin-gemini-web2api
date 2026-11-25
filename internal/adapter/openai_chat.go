@@ -406,7 +406,8 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 	if request.TruncateTo > 0 {
 		turns, turnFiles = truncateTurns(turns, turnFiles, suffix, request.TruncateTo)
 	}
-	return renderTranscript(turns, suffix), slices.Concat(turnFiles...), nil
+	prompt, files := transcriptPrompt(turns, suffix, slices.Concat(turnFiles...))
+	return prompt, files, nil
 }
 
 // truncateTurns 在提示词超过 limit 个 token 时从最早的一轮起整轮删除，每删一轮减去其角色块的 token 数：一轮从系统消息之后第一条消息开始，到下一条 user 消息之前，最后一条 user 消息所在的轮次保留

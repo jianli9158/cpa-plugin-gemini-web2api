@@ -474,20 +474,20 @@ func geminiFileObject(c *gin.Context, file requestdb.StoredFile) gin.H {
 		"name": "files/" + file.ID, "displayName": file.Filename, "mimeType": file.MIMEType,
 		"sizeBytes": strconv.FormatInt(file.Bytes, 10), "createTime": file.CreatedAt.UTC().Format(time.RFC3339Nano),
 		"updateTime": file.CreatedAt.UTC().Format(time.RFC3339Nano), "sha256Hash": base64.StdEncoding.EncodeToString(digest),
-		"uri": requestBaseURL(c) + "/v1beta/files/" + file.ID, "state": "ACTIVE", "source": "UPLOADED",
+		"uri": RequestBaseURL(c) + "/v1beta/files/" + file.ID, "state": "ACTIVE", "source": "UPLOADED",
 	}
 	if !file.ExpiresAt.IsZero() {
 		object["expirationTime"] = file.ExpiresAt.UTC().Format(time.RFC3339Nano)
 	}
 	if file.Source == "generated" {
 		object["source"] = "GENERATED"
-		object["downloadUri"] = requestBaseURL(c) + "/v1beta/files/" + file.ID + ":download?alt=media"
+		object["downloadUri"] = RequestBaseURL(c) + "/v1beta/files/" + file.ID + ":download?alt=media"
 	}
 	return object
 }
 
-// requestBaseURL 返回客户端访问本服务所用的协议与主机
-func requestBaseURL(c *gin.Context) string {
+// RequestBaseURL 返回客户端访问本服务所用的协议与主机
+func RequestBaseURL(c *gin.Context) string {
 	scheme := "http"
 	if c.Request.TLS != nil {
 		scheme = "https"
@@ -659,7 +659,7 @@ func startGeminiUpload(c *gin.Context, store *requestdb.Store) {
 	}
 	geminiUploads.sessions[uploadID] = &pendingUpload{file: record, temporary: temporary.Name(), expected: expected, created: time.Now()}
 	geminiUploads.Unlock()
-	c.Header("X-Goog-Upload-URL", requestBaseURL(c)+"/upload/v1beta/files?upload_id="+url.QueryEscape(uploadID)+"&upload_protocol=resumable")
+	c.Header("X-Goog-Upload-URL", RequestBaseURL(c)+"/upload/v1beta/files?upload_id="+url.QueryEscape(uploadID)+"&upload_protocol=resumable")
 	c.Header("X-Goog-Upload-Status", "active")
 	c.Header("X-Goog-Upload-Chunk-Granularity", "8388608")
 	c.Status(http.StatusOK)

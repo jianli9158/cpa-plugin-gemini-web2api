@@ -11,7 +11,6 @@ const (
 	EventCitations     EventKind = "citations"
 	EventMedia         EventKind = "media"
 	EventImageProgress EventKind = "image_progress"
-	EventPhase         EventKind = "phase"
 	EventMetadata      EventKind = "metadata"
 	EventError         EventKind = "error"
 	EventDone          EventKind = "done"
@@ -40,10 +39,8 @@ const (
 type FinishReason string
 
 const (
-	FinishUnknown   FinishReason = "unknown"
-	FinishStop      FinishReason = "stop"
-	FinishCancelled FinishReason = "cancelled"
-	FinishError     FinishReason = "error"
+	FinishStop  FinishReason = "stop"
+	FinishError FinishReason = "error"
 )
 
 // Usage 表示上游提供的令牌用量

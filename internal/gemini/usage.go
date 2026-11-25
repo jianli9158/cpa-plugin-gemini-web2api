@@ -40,8 +40,7 @@ func (c *Client) FetchUsage(ctx context.Context) (UsageInfo, error) {
 	if err != nil {
 		return UsageInfo{}, err
 	}
-	contextWindow := usageContextWindow(usage.Tier, int(c.contextSize.Load()))
-	c.contextSize.Store(int64(contextWindow))
+	c.contextSize.Store(int64(usageContextWindow(usage.Tier)))
 	c.usage.Store(&usage)
 	return usage, nil
 }
@@ -192,9 +191,6 @@ func parseUsageInfo(payload []any) (UsageInfo, error) {
 			usage.RemainingCredits = &remaining
 		}
 	}
-	if usage.Current == nil || usage.Weekly == nil {
-		return UsageInfo{}, fmt.Errorf("官网用量数据缺少五小时与每周窗口")
-	}
 	return usage, nil
 }
 
@@ -234,7 +230,8 @@ func usageTier(code int) string {
 	}
 }
 
-func usageContextWindow(tier string, current int) int {
+// usageContextWindow 返回套餐的上下文窗口 tokens，未知套餐为 0，表示不在本地检查窗口
+func usageContextWindow(tier string) int {
 	switch tier {
 	case "free":
 		return 32 * 1024
@@ -242,12 +239,8 @@ func usageContextWindow(tier string, current int) int {
 		return 128 * 1024
 	case "pro", "ultra":
 		return 1024 * 1024
-	default:
-		if current > 0 {
-			return current
-		}
-		return 128 * 1024
 	}
+	return 0
 }
 
 func numberAt(values []any, index int) (float64, bool) {

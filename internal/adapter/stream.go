@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -62,11 +63,18 @@ type sessionAccountChangedError struct {
 func (e *sessionAccountChangedError) Error() string { return e.err.Error() }
 func (e *sessionAccountChangedError) Unwrap() error { return e.err }
 
-// outputMismatchError 是回答不符合请求要求的输出形式时的可重试错误，validation 表示结构化输出没有通过解析或校验
+// outputMismatchError 是回答不符合请求要求的输出形式时的可重试错误，validation 表示结构化输出没有通过解析或校验，correction 表示回答声称工具不可用、重新生成时附带纠正说明
 type outputMismatchError struct {
 	err        *gemini.ProtocolError
 	validation bool
+	correction bool
 }
+
+// correctableKey 是请求上下文中报告本次回答能否作废并带纠正说明重新生成的函数
+type correctableKey struct{}
+
+// toolOpeningHoldBytes 是带工具的回答开头扣住正文的字节数，期间没有出现声称或拒答的谓语才开始实时输出
+const toolOpeningHoldBytes = 600
 
 func (e *outputMismatchError) Error() string { return e.err.Error() }
 func (e *outputMismatchError) Unwrap() error { return e.err }
@@ -81,7 +89,9 @@ type streamProjection struct {
 	// gateCalls 表示正文扣到结束时仍实时输出调用块之前的部分
 	gateCalls bool
 	// heldText 是已到达但可能属于调用块开头的正文尾部
-	heldText       string
+	heldText string
+	// holdOpening 表示正文开头仍扣住，用于在发出前识别声称工具不可用的回答
+	holdOpening    bool
 	includeThought bool
 	// sentText 是已发出的正文
 	sentText strings.Builder
@@ -102,6 +112,7 @@ func newStreamProjection(bridge ToolBridge, includeThought bool) *streamProjecti
 		bufferText:     len(bridge.Definitions) > 0 || holdAll,
 		bufferThought:  bridge.RequireImageGeneration || disallowHostedTools || fakeStream.Load(),
 		gateCalls:      len(bridge.Definitions) > 0 && !holdAll,
+		holdOpening:    len(bridge.Definitions) > 0 && !holdAll,
 		includeThought: includeThought,
 	}
 }
@@ -133,8 +144,13 @@ func (p *streamProjection) project(event gemini.Event, emit func(gemini.Event) e
 	}
 	if event.Kind == gemini.EventText && p.gateCalls {
 		safe, held, call := splitCallGate(p.sentText.String(), p.heldText+event.Delta)
-		p.heldText = held
 		p.gateCalls = !call
+		if opening := safe + held; p.holdOpening && !call && (len(opening) < toolOpeningHoldBytes || toolExcuseOpening(opening)) {
+			p.heldText = opening
+			return nil
+		}
+		p.holdOpening = false
+		p.heldText = held
 		if safe == "" {
 			return nil
 		}
@@ -267,6 +283,14 @@ func resumedPrompt(prompt, sent string) string {
 		prompt = "<|im_start|>user\n" + strings.TrimRightFunc(prompt, unicode.IsSpace) + "\n<|im_end|>\n"
 	}
 	return prompt + "<|im_start|>system\n" + resumeInstruction + "\n<|im_end|>\n" + assistantTurnStart + sent
+}
+
+// correctedPrompt 把纠正说明作为系统块写在提示词末尾的助手轮之前，单条消息的提示词接在末尾
+func correctedPrompt(prompt, correction string) string {
+	if body, transcript := strings.CutSuffix(prompt, assistantTurnStart); transcript {
+		return body + "<|im_start|>system\n" + correction + "\n<|im_end|>\n" + assistantTurnStart
+	}
+	return prompt + "\n\n" + correction
 }
 
 // resumeAligner 去掉接续生成开头对已发出正文的复述
@@ -442,6 +466,14 @@ func runGenerationAttempts(
 	}
 
 	excludedAccountIDs := make(map[string]struct{})
+	// promptTokens 是新会话尝试因窗口不足失败时需要的输入 token 数，之后选号跳过上下文窗口装不下它的账号
+	var promptTokens atomic.Int64
+	ctx = balancer.ContextWithPromptTokens(ctx, &promptTokens)
+	regenerated, regenerating := 0, false
+	// 声称工具不可用的回答只在首个可见输出前、还能在新会话重新生成时作废
+	ctx = context.WithValue(ctx, correctableKey{}, func() bool {
+		return !visibleOutput() && regenerated < regenerations && (sessionKey == "" || newSession || rebuildable)
+	})
 	availableAccounts := pool.Size()
 	if availableAccounts == 0 {
 		return generationResult{}, "", noAccountError(ctx, pool, modelName)
@@ -451,7 +483,6 @@ func runGenerationAttempts(
 		requestAttempts = availableAccounts
 	}
 	usedRequestAttempts := 0
-	regenerated, regenerating := 0, false
 	var resume partialOutput
 	lastAccountID := ""
 	var lastErr error
@@ -487,6 +518,7 @@ func runGenerationAttempts(
 			clear(excludedAccountIDs)
 			continue
 		}
+		attemptRegenerating := regenerating
 		regenerating = false
 		if client == nil {
 			if sessionKey != "" && !newSession && accountID != "" {
@@ -503,6 +535,9 @@ func runGenerationAttempts(
 				return generationResult{}, lastAccountID, lastErr
 			}
 			return generationResult{}, accountID, noAccountError(ctx, pool, requestedModel)
+		}
+		if projection != nil && !projection.visibleOutput {
+			*projection = *newStreamProjection(projection.bridge, projection.includeThought)
 		}
 		attemptSessionKey, attemptNewSession, attemptResume := sessionKey, newSession, resume
 		run := func(ctx context.Context, client *gemini.Client, accountID string, emit func(gemini.Event) error) (generationResult, error) {
@@ -530,8 +565,16 @@ func runGenerationAttempts(
 		if lastErr == nil || !isAccountContextError(err) {
 			lastErr, lastAccountID = err, accountID
 		}
+		if tokens := accountContextTokens(err); tokens > int(promptTokens.Load()) {
+			promptTokens.Store(int64(tokens))
+			trace.Progress("WARN", accountID, "排除上下文窗口装不下请求的账号", "所需 tokens", tokens)
+		}
 		if ctx.Err() != nil {
 			return generationResult{}, accountID, err
+		}
+		var mismatch *outputMismatchError
+		if errors.As(err, &mismatch) && mismatch.correction {
+			bridge.Corrected = true
 		}
 		if errors.Is(err, gemini.ErrConversationLost) && rebuildable && !newSession && !visibleOutput() {
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
@@ -555,7 +598,6 @@ func runGenerationAttempts(
 		if rebuildable && sessionKey != "" && !newSession && (isAccountContextError(err) || errors.Is(err, gemini.ErrGuestAttachments) || retryableAccountError(err) && !visibleOutput()) {
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
 			excludedAccountIDs[accountID] = struct{}{}
-			excludeNarrowAccounts(trace, pool, excludedAccountIDs, accountID, err)
 			if (gemini.TransientError(err) || isOutputMismatchError(err)) && !visibleOutput() && regenerated < regenerations {
 				regenerated++
 				regenerating = true
@@ -569,7 +611,7 @@ func runGenerationAttempts(
 			}
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
 			excludedAccountIDs[accountID] = struct{}{}
-			excludeNarrowAccounts(trace, pool, excludedAccountIDs, accountID, err)
+			regenerating = attemptRegenerating
 			continue
 		}
 		if (gemini.TransientError(err) || isOutputMismatchError(err)) && (sessionKey == "" || newSession) && regenerated < regenerations && !visibleOutput() {
@@ -678,15 +720,22 @@ func runGenerationWithClient(
 		}
 		return generationResult{}, &gemini.ProtocolError{HTTPStatus: 400, Message: err.Error()}
 	}
+	if bridge.Corrected {
+		prompt = correctedPrompt(prompt, bridge.toolCorrection())
+	}
 	if resume.text != "" {
 		prompt = resumedPrompt(prompt, resume.text)
 	}
 	promptTokens := contextTokens + tokencount.Content(prompt) + mediaTokens(files)
 	if contextWindow := client.ContextWindow(); contextWindow > 0 && promptTokens > contextWindow {
-		return generationResult{}, &accountContextError{tokens: promptTokens, err: &gemini.ProtocolError{
+		contextErr := &accountContextError{err: &gemini.ProtocolError{
 			HTTPStatus: 413,
 			Message:    fmt.Sprintf("账号上下文窗口为 %d tokens，当前请求需要 %d tokens", contextWindow, promptTokens),
 		}}
+		if !continuation {
+			contextErr.tokens = promptTokens
+		}
+		return generationResult{}, contextErr
 	}
 	feature := gemini.Feature(0)
 	if media.requireImage {
@@ -836,8 +885,16 @@ func runGenerationWithClient(
 		return generationResult{}, &outputMismatchError{err: &gemini.ProtocolError{HTTPStatus: 502, Message: "Gemini Web 完成了回答但没有正文、代码、媒体或工具调用", Retryable: true}}
 	}
 	if (len(bridge.Definitions) > 0 || len(bridge.JSONSchema) > 0 || len(bridge.Enum) > 0) && !truncated {
-		if _, _, err := bridge.Parse(primary.Text); err != nil {
+		_, calls, err := bridge.Parse(primary.Text)
+		if err != nil && !errors.Is(err, errMissingRequiredCall) {
 			return generationResult{}, &outputMismatchError{err: &gemini.ProtocolError{HTTPStatus: 502, Message: err.Error(), Retryable: true}, validation: len(bridge.Definitions) == 0}
+		}
+		correctable, _ := ctx.Value(correctableKey{}).(func() bool)
+		if len(bridge.Definitions) > 0 && len(calls) == 0 && !strings.EqualFold(strings.TrimSpace(bridge.Choice), "none") && correctable != nil && correctable() && misreportsTools(primary.Text) {
+			return generationResult{}, &outputMismatchError{err: &gemini.ProtocolError{HTTPStatus: 502, Message: "回答声称工具调用次数用尽或无法使用工具", Retryable: true}, correction: true}
+		}
+		if err != nil {
+			return generationResult{}, &outputMismatchError{err: &gemini.ProtocolError{HTTPStatus: 502, Message: err.Error(), Retryable: true}}
 		}
 	}
 	if accumulator.Usage == nil {
@@ -856,7 +913,7 @@ func runGenerationWithClient(
 			conversation.Update(accumulator.Session)
 			snapshot = conversation.Snapshot()
 		}
-		if continueSession.Load() {
+		if continueSession.Load() && !client.Guest() {
 			keys := []string{responseID, snapshot.CID}
 			remember := allowNewSession && sessionKey != "" && !isHistoryKey(sessionKey)
 			if remember {
@@ -893,7 +950,7 @@ func runGenerationWithClient(
 		ResponseID:    responseID,
 		ProviderModel: providerModel,
 	}
-	if continueSession.Load() {
+	if continueSession.Load() && !client.Guest() {
 		result.ConversationID = accumulator.Session.CID
 	}
 	if cutter != nil {
@@ -985,24 +1042,13 @@ func isSessionAccountChanged(err error) bool {
 	return errors.As(err, &changed)
 }
 
-// accountContextTokens 返回账号上下文窗口不足时这次请求需要的输入 token 数
+// accountContextTokens 返回新会话尝试因账号上下文窗口不足失败时需要的输入 token 数，其余错误为 0
 func accountContextTokens(err error) int {
 	var contextErr *accountContextError
 	if errors.As(err, &contextErr) {
 		return contextErr.tokens
 	}
 	return 0
-}
-
-// excludeNarrowAccounts 在账号因上下文窗口不足拒绝请求时把上下文窗口同样装不下这次请求的账号与访客会话一并排除，避免向它们重复上传附件并徒劳发起请求
-func excludeNarrowAccounts(trace *logging.Request, pool *balancer.AccountPool, excludedAccountIDs map[string]struct{}, accountID string, err error) {
-	tokens := accountContextTokens(err)
-	if tokens <= 0 {
-		return
-	}
-	if added := pool.ExcludeNarrowContext(excludedAccountIDs, tokens); len(added) > 0 {
-		trace.Progress("WARN", accountID, "排除上下文窗口装不下请求的账号", "需要", tokens, "账号", strings.Join(added, ","))
-	}
 }
 
 // publicModelID 返回响应中的模型 ID：别名取映射目标，改名前的旧 ID 取当前 ID，gemini-default 在各就绪账号（没有账号时为访客会话）的默认模型相同时取该模型

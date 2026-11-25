@@ -27,7 +27,7 @@ const dataDir = "data"
 
 // Version returns the plugin runtime version.
 func Version() string {
-	return "1.0.10"
+	return "1.0.11"
 }
 
 func authDir(paths []string) string {
@@ -175,7 +175,6 @@ func NewPluginRuntime(ctx context.Context, cfg config.Config, runtimeDataDir str
 	router := NewRouter(Deps{
 		Pool:     pool,
 		Store:    store,
-		Accounts: manager,
 	})
 
 	rt := &PluginRuntime{
