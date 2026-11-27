@@ -27,7 +27,7 @@ const dataDir = "data"
 
 // Version returns the plugin runtime version.
 func Version() string {
-	return "1.0.11"
+	return "1.0.12"
 }
 
 func authDir(paths []string) string {
