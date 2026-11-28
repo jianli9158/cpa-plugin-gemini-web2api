@@ -128,7 +128,7 @@ func (p *Plugin) handleSchedulerPick(raw []byte) (any, error) {
 		}
 		if cleanModel != "" {
 			if client := rt.Pool.Client(acc.AccountID); client != nil && len(client.Models()) > 0 {
-				if _, resolveErr := client.ResolveModel(cleanModel); resolveErr != nil {
+				if resolved, resolveErr := client.ResolveModel(cleanModel); resolveErr != nil || config.IsModelHidden(resolved.ID, resolved.PredefinedGem) {
 					continue
 				}
 			}

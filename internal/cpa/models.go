@@ -185,6 +185,9 @@ func (p *Plugin) collectCatalogModelsForAccount(accountID string) []pluginapi.Mo
 			if client := rt.Pool.Client(accountID); client != nil {
 				byID := make(map[string]adapter.CatalogModel)
 				for _, m := range client.Models() {
+					if config.IsModelHidden(m.ID, m.PredefinedGem) {
+						continue
+					}
 					cm := adapter.CatalogModel{
 						Model:              m,
 						MinInputTokenLimit: client.ContextWindow(),
@@ -196,27 +199,22 @@ func (p *Plugin) collectCatalogModelsForAccount(accountID string) []pluginapi.Mo
 					byID[m.ID] = cm
 				}
 				if len(rawModels) > 0 {
-					if _, exists := byID[gemini.DefaultModelID]; !exists {
-						var defaultLevels []gemini.ThinkingLevel
-						for _, m := range rawModels {
-							if m.Default {
-								defaultLevels = m.ThinkingLevels
-								break
-							}
+					if _, exists := byID[gemini.DefaultModelID]; !exists && !config.IsModelHidden(gemini.DefaultModelID, false) {
+						if def, err := client.ResolveModel(gemini.DefaultModelID); err == nil && !config.IsModelHidden(def.ID, def.PredefinedGem) {
+							rawModels = append(rawModels, adapter.CatalogModel{
+								Model: gemini.Model{
+									ID:             gemini.DefaultModelID,
+									DisplayName:    "Default",
+									Description:    "Each account's official default model",
+									Capabilities:   []string{"generateContent", "streamGenerateContent"},
+									ThinkingLevels: def.ThinkingLevels,
+								},
+								MinInputTokenLimit: client.ContextWindow(),
+								MaxInputTokenLimit: client.ContextWindow(),
+								AccountCount:       1,
+								Accounts:           []string{accountID},
+							})
 						}
-						rawModels = append(rawModels, adapter.CatalogModel{
-							Model: gemini.Model{
-								ID:             gemini.DefaultModelID,
-								DisplayName:    "Default",
-								Description:    "Each account's official default model",
-								Capabilities:   []string{"generateContent", "streamGenerateContent"},
-								ThinkingLevels: defaultLevels,
-							},
-							MinInputTokenLimit: client.ContextWindow(),
-							MaxInputTokenLimit: client.ContextWindow(),
-							AccountCount:       1,
-							Accounts:           []string{accountID},
-						})
 					}
 					aliases := config.ModelAliases()
 					names := make([]string, 0, len(aliases))
@@ -225,11 +223,22 @@ func (p *Plugin) collectCatalogModelsForAccount(accountID string) []pluginapi.Mo
 					}
 					sort.Strings(names)
 					for _, alias := range names {
-						target, ok := byID[gemini.CanonicalModelID(aliases[alias])]
-						if _, exists := byID[alias]; !ok || exists {
+						if _, exists := byID[alias]; exists || alias == gemini.DefaultModelID || config.IsModelHidden(alias, false) {
 							continue
 						}
-						target.ID, target.AliasOf, target.Default = alias, target.ID, false
+						resolved, err := client.ResolveModel(aliases[alias])
+						if err != nil || config.IsModelHidden(resolved.ID, resolved.PredefinedGem) {
+							continue
+						}
+						target := adapter.CatalogModel{
+							Model:              resolved,
+							MinInputTokenLimit: client.ContextWindow(),
+							MaxInputTokenLimit: client.ContextWindow(),
+							AccountCount:       1,
+							Accounts:           []string{accountID},
+							AliasOf:            resolved.ID,
+						}
+						target.ID, target.Default = alias, false
 						rawModels = append(rawModels, target)
 					}
 					renames := gemini.ModelRenames()
@@ -239,11 +248,12 @@ func (p *Plugin) collectCatalogModelsForAccount(accountID string) []pluginapi.Mo
 					}
 					sort.Strings(olds)
 					for _, old := range olds {
-						target, ok := byID[renames[old]]
-						if _, exists := byID[old]; !ok || exists {
+						rename := renames[old]
+						target, ok := byID[rename.Current]
+						if _, exists := byID[old]; !ok || exists || target.Hash != rename.Hash || config.IsModelHidden(old, false) {
 							continue
 						}
-						target.ID, target.AliasOf, target.Default = old, renames[old], false
+						target.ID, target.AliasOf, target.Default = old, rename.Current, false
 						rawModels = append(rawModels, target)
 					}
 				}
@@ -271,6 +281,9 @@ func (p *Plugin) collectCatalogModelsForAccount(accountID string) []pluginapi.Mo
 	}
 
 	for _, cm := range rawModels {
+		if cm.Hidden || config.IsModelHidden(cm.ID, cm.PredefinedGem) {
+			continue
+		}
 		info := convertCatalogModel(cm)
 		if info.ID != "" {
 			addModel(info)

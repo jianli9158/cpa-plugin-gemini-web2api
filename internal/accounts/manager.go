@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -143,12 +144,20 @@ func (m *Manager) launchGuest(previous *managed, firstDone func()) {
 	m.mu.Unlock()
 	go func() {
 		defer close(entry.done)
-		m.runGuest(ctx, client, previous, firstDone)
+		m.runGuest(ctx, proxy, client, previous, firstDone)
 	}()
 }
 
+// withAccountProxyHint 在容器内经环回代理遇到网络连接或超时失败时附加宿主机代理排障说明
+func withAccountProxyHint(proxyURL string, err error) error {
+	if errors.Is(err, gemini.ErrTransport) || errors.Is(err, context.DeadlineExceeded) {
+		return proxypool.WithLoopbackHint(proxyURL, err)
+	}
+	return err
+}
+
 // runGuest 初始化访客会话直到成功，之后定期重读首页与模型目录，重读失败时保留原有参数；首轮初始化结束时换下 previous
-func (m *Manager) runGuest(ctx context.Context, client *gemini.Client, previous *managed, firstDone func()) {
+func (m *Manager) runGuest(ctx context.Context, proxy string, client *gemini.Client, previous *managed, firstDone func()) {
 	first := sync.OnceFunc(firstDone)
 	defer first()
 	for {
@@ -168,6 +177,7 @@ func (m *Manager) runGuest(ctx context.Context, client *gemini.Client, previous 
 			logging.Info(gemini.GuestID, "访客会话就绪", "模型", len(client.Models()), "耗时", time.Since(started))
 			break
 		}
+		err = withAccountProxyHint(proxy, err)
 		retry := retryInterval(settings.RetryInterval, err)
 		if m.pool.MarkFailed(gemini.GuestID, err) {
 			logging.Warn(gemini.GuestID, "访客会话初始化失败", "耗时", time.Since(started), "下次重试", retry, "错误", err)
@@ -178,7 +188,10 @@ func (m *Manager) runGuest(ctx context.Context, client *gemini.Client, previous 
 		}
 	}
 	first()
-	for sleep(ctx, guestReloadInterval) {
+	for sleep(ctx, rotationWait(guestReloadInterval)) {
+		if !m.waitCaptchaCooldown(ctx, gemini.GuestID) {
+			return
+		}
 		before := catalogOf(client)
 		initContext, cancel := context.WithTimeout(ctx, m.Settings().InitTimeout)
 		err := client.Init(initContext)
@@ -187,6 +200,14 @@ func (m *Manager) runGuest(ctx context.Context, client *gemini.Client, previous 
 			return
 		}
 		if err != nil {
+			err = withAccountProxyHint(proxy, err)
+			if errors.Is(err, gemini.ErrCaptcha) {
+				m.pool.ReportFailure(gemini.GuestID, "", err)
+				if !m.waitCaptchaCooldown(ctx, gemini.GuestID) {
+					return
+				}
+				continue
+			}
 			m.pool.RecordError(gemini.GuestID, err)
 			logging.Warn(gemini.GuestID, "访客会话重读失败", "下次", guestReloadInterval, "错误", err)
 			continue
@@ -369,6 +390,7 @@ func (m *Manager) run(ctx context.Context, account auth.LoadedAccount, client *g
 			logReady(account, client, time.Since(started))
 			break
 		}
+		err = withAccountProxyHint(account.ProxyURL, err)
 		retry := retryInterval(settings.RetryInterval, err)
 		if m.pool.MarkFailed(account.ID, err) {
 			logging.Error(account.ID, "账号初始化失败", "耗时", time.Since(started), "下次重试", retry, "错误", err)
@@ -384,6 +406,9 @@ func (m *Manager) run(ctx context.Context, account auth.LoadedAccount, client *g
 
 	rotator := gemini.NewCookieRotator(client)
 	for {
+		if !m.waitCaptchaCooldown(ctx, account.ID) {
+			return
+		}
 		started := time.Now()
 		before := catalogOf(client)
 		next, err := rotator.Rotate(ctx)
@@ -403,6 +428,9 @@ func (m *Manager) run(ctx context.Context, account auth.LoadedAccount, client *g
 		case rotationTooSoon(err):
 			logging.Debug(account.ID, "Cookie 轮换过早", "下次", next)
 		case gemini.IsAuthenticationError(err):
+			if account.OAuth == nil {
+				next = max(next, time.Hour)
+			}
 			if m.pool.MarkFailed(account.ID, err) {
 				logging.Warn(account.ID, "账号会话失效", "下次检查", next, "错误", err)
 			}
@@ -412,37 +440,72 @@ func (m *Manager) run(ctx context.Context, account auth.LoadedAccount, client *g
 			}
 		case errors.Is(err, gemini.ErrCaptcha):
 			m.pool.ReportFailure(account.ID, "", err)
+			continue
 		default:
 			m.pool.RecordError(account.ID, err)
 			logging.Warn(account.ID, "Cookie 轮换失败", "下次", next, "错误", err)
 		}
-		if !sleep(ctx, next) {
+		if !sleep(ctx, rotationWait(next)) {
 			return
 		}
 	}
 }
 
-// initialize 读取首页参数、模型目录、偏好与用量
+// rotationJitter 是周期轮换的随机错峰上限，避免同一出口的多个账号同时发出轮换与重读请求
+const rotationJitter = 30 * time.Second
+
+// rotationWait 在长周期轮换间隔上加随机错峰，短间隔与设备绑定主动刷新保持原值
+func rotationWait(next time.Duration) time.Duration {
+	if next < guestReloadInterval {
+		return next
+	}
+	return next + rand.N(rotationJitter)
+}
+
+// waitCaptchaCooldown 在账号处于人机验证冷却期间暂停后台请求，冷却结束、被手动清除或 ctx 取消时返回
+func (m *Manager) waitCaptchaCooldown(ctx context.Context, accountID string) bool {
+	for {
+		until := m.pool.CaptchaCooldownUntil(accountID)
+		wait := time.Until(until)
+		if until.IsZero() || wait <= 0 {
+			return true
+		}
+		changed := m.pool.Changed()
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-changed:
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+}
+
+// initialize 读取首页参数、模型目录、偏好与用量；官网不提供该账号用量数据时（例如 Google Workspace 账号）照常就绪
 func initialize(ctx context.Context, client *gemini.Client, timeout time.Duration) error {
 	initContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := client.Init(initContext); err != nil {
 		return err
 	}
-	_, err := client.FetchUsage(initContext)
-	return err
+	if _, err := client.FetchUsage(initContext); err != nil && !errors.Is(err, gemini.ErrUsageUnavailable) {
+		return err
+	}
+	return nil
 }
 
-// rotationTooSoon 判断轮换失败是否为距上次轮换过近的 429
+// rotationTooSoon 判断轮换失败是否为距上次轮换过近的 429，排除人机验证拦截
 func rotationTooSoon(err error) bool {
 	var protocolErr *gemini.ProtocolError
-	return errors.As(err, &protocolErr) && protocolErr.Code == 429
+	return !errors.Is(err, gemini.ErrCaptcha) && errors.As(err, &protocolErr) && protocolErr.Code == 429
 }
 
 func logReady(account auth.LoadedAccount, client *gemini.Client, duration time.Duration) {
 	fields := []any{"模型", len(client.Models()), "窗口", client.ContextWindow()}
-	if usage := client.CachedUsage(); usage != nil {
-		fields = append([]any{"层级", usage.Tier}, fields...)
+	if tier := client.Tier(); tier != "" {
+		fields = append([]any{"层级", tier}, fields...)
 	}
 	if email := client.Email(); email != "" {
 		fields = append([]any{"邮箱", email}, fields...)
@@ -461,10 +524,7 @@ type accountCatalog struct {
 }
 
 func catalogOf(client *gemini.Client) accountCatalog {
-	var catalog accountCatalog
-	if usage := client.CachedUsage(); usage != nil {
-		catalog.tier = usage.Tier
-	}
+	catalog := accountCatalog{tier: client.Tier()}
 	for _, model := range client.Models() {
 		catalog.models = append(catalog.models, model.ID)
 	}
@@ -627,7 +687,7 @@ func (m *Manager) TemporaryClient(ctx context.Context, accountID string) (*gemin
 	}
 	if err := initialize(ctx, client, settings.InitTimeout); err != nil {
 		client.CloseIdleConnections()
-		return nil, err
+		return nil, withAccountProxyHint(proxy, err)
 	}
 	return client, nil
 }

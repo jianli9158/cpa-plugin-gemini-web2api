@@ -17,9 +17,10 @@ type Deps struct {
 	Store *requestdb.Store
 }
 
-// NewRouter 注册就绪检查与全部兼容 API（进程内插件 RPC 专用）
+// NewRouter 登记账本库并注册就绪检查与全部兼容 API（进程内插件 RPC 专用）
 func NewRouter(deps Deps) *gin.Engine {
 	pool := deps.Pool
+	adapter.ConfigureStore(pool, deps.Store)
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())

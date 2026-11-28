@@ -67,11 +67,8 @@ func writeProtocolError(c *gin.Context, status int, message string) {
 	}
 }
 
-// RequestMiddleware 为公开 API 请求分配 ID、跟踪生成请求的阶段，结束时输出结果并把生成请求写入账本，首次创建时从账本补入首事件样本
+// RequestMiddleware 为公开 API 请求分配 ID、跟踪生成请求的阶段，结束时输出结果并把生成请求写入账本
 func RequestMiddleware(store *requestdb.Store) gin.HandlerFunc {
-	if store != nil {
-		go firstEvents.seed(store)
-	}
 	return func(c *gin.Context) {
 		started := time.Now()
 		request, ctx := logging.NewRequest(c.Request.Context(), c.Request.Method, c.Request.URL.Path, c.ClientIP())

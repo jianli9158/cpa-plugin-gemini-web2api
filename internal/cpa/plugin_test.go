@@ -46,8 +46,8 @@ func TestPluginLifecycleAndCapabilities(t *testing.T) {
 	if !strings.Contains(string(regJSON), `"Name":"gemini-web2api"`) {
 		t.Fatalf("unexpected registration metadata: %s", string(regJSON))
 	}
-	if !strings.Contains(string(regJSON), `"Version":"1.0.11"`) || !strings.Contains(string(regJSON), `"continue_session"`) {
-		t.Fatalf("expected version 1.0.11 and continue_session config field: %s", string(regJSON))
+	if !strings.Contains(string(regJSON), `"Version":"1.0.12"`) || !strings.Contains(string(regJSON), `"continue_session"`) || !strings.Contains(string(regJSON), `"hidden_models"`) {
+		t.Fatalf("expected version 1.0.12, continue_session and hidden_models config fields: %s", string(regJSON))
 	}
 	if !strings.Contains(string(regJSON), `"executor":true`) || !strings.Contains(string(regJSON), `"auth_provider":true`) {
 		t.Fatalf("missing expected capabilities: %s", string(regJSON))

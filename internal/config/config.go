@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,12 +13,16 @@ import (
 // MinLogTotalMB 是日志目录总量上限的最小值，容纳当前文件与一个轮转文件
 const MinLogTotalMB = 20
 
+// PredefinedGemsSelector 在 HIDDEN_MODELS 中表示官网 CNgdBe 类型 3 的全部 Google 预置 Gem
+const PredefinedGemsSelector = "predefined-gems"
+
 // Defaults 是默认配置项参考值
 var Defaults = map[string]string{
-	"ACCOUNT_COOLDOWN": "2m", "SESSION_TTL": "30m", "INIT_TIMEOUT": "20s", "MODEL_MAPPING": "", "GEMINI_SAVE_HISTORY": "false", "GEMINI_CONTINUE_SESSION": "false",
+	"ACCOUNT_COOLDOWN": "2m", "SESSION_TTL": "30m", "INIT_TIMEOUT": "20s", "MODEL_MAPPING": "", "HIDDEN_MODELS": "gemini-canvas,gemini-guided-learning," + PredefinedGemsSelector,
+	"GEMINI_SAVE_HISTORY": "false", "GEMINI_CONTINUE_SESSION": "false",
 	"LOG_LEVEL": "info", "LOG_FORMAT": "text", "REQUEST_BODY_LOG": "false", "LOG_FILE": "true", "LOG_MAX_TOTAL_MB": "500",
 	"PER_ACCOUNT_CONCURRENCY": "1", "ROUTING_STRATEGY": "round-robin",
-	"FIRST_EVENT_HEDGE": "auto", "FIRST_EVENT_HEDGE_MODELS": "gemini-4-carbon,gemini-4-argon",
+	"FIRST_EVENT_HEDGE": "auto", "FIRST_EVENT_HEDGE_MODELS": "gemini-4-carbon",
 	"NONSTREAM_KEEPALIVE": "true", "FAKE_STREAM": "false",
 	"ACCOUNT_ORDER": "", "MODEL_ACCOUNTS": "",
 }
@@ -29,8 +34,10 @@ type Config struct {
 	AccountCooldown time.Duration
 	SessionTTL      time.Duration
 	InitTimeout     time.Duration
-	ModelMapping    map[string]string
-	SaveHistory     bool
+	ModelMapping map[string]string
+	// HiddenModels 是在公开 API 中关闭的模型 ID 或 predefined-gems 列表
+	HiddenModels []string
+	SaveHistory  bool
 	// ContinueSession 为真时后续请求续接已登记的网页会话，为假时每个请求新建网页会话
 	ContinueSession bool
 	// NonstreamKeepalive 为真时非流式请求等待结果期间每 10 秒写出一个换行
@@ -52,7 +59,80 @@ type Config struct {
 var (
 	modelMapping = map[string]string{}
 	mappingMu    sync.RWMutex
+
+	hiddenMu        sync.RWMutex
+	hiddenModelList []string
+	hiddenModelSet  map[string]bool
+	hidePredefined  bool
 )
+
+func init() {
+	SetHiddenModels(NormalizeHiddenModels(Defaults["HIDDEN_MODELS"]))
+}
+
+// NormalizeHiddenModels 解析逗号分隔的隐藏模型名单，规范为小写、去前缀与去重排序后的切片
+func NormalizeHiddenModels(value string) []string {
+	items := SplitList(value)
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		normalized := normalizeHiddenEntry(item)
+		if normalized != "" {
+			result = append(result, normalized)
+		}
+	}
+	slices.Sort(result)
+	return slices.Compact(result)
+}
+
+// FormatHiddenModels 返回隐藏模型名单写入配置的规范逗号分隔字符串
+func FormatHiddenModels(models []string) string {
+	return strings.Join(NormalizeHiddenModels(strings.Join(models, ",")), ",")
+}
+
+// SetHiddenModels 替换当前生效的隐藏模型名单
+func SetHiddenModels(models []string) {
+	normalized := NormalizeHiddenModels(strings.Join(models, ","))
+	set := make(map[string]bool, len(normalized))
+	predefined := false
+	for _, item := range normalized {
+		if item == PredefinedGemsSelector {
+			predefined = true
+			continue
+		}
+		set[item] = true
+	}
+	hiddenMu.Lock()
+	hiddenModelList = normalized
+	hiddenModelSet = set
+	hidePredefined = predefined
+	hiddenMu.Unlock()
+}
+
+// HiddenModels 返回当前生效的隐藏模型名单副本
+func HiddenModels() []string {
+	hiddenMu.RLock()
+	defer hiddenMu.RUnlock()
+	return slices.Clone(hiddenModelList)
+}
+
+// IsModelHidden 判断指定模型 ID 或 Google 预置 Gem 是否在设置中关闭
+func IsModelHidden(id string, predefinedGem bool) bool {
+	key := normalizeHiddenEntry(id)
+	hiddenMu.RLock()
+	defer hiddenMu.RUnlock()
+	if predefinedGem && hidePredefined {
+		return true
+	}
+	return key != "" && hiddenModelSet[key]
+}
+
+// normalizeHiddenEntry 去掉首尾空白、models/ 或 google/ 前缀与 [1m] 后缀并转为小写
+func normalizeHiddenEntry(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.TrimSuffix(value, "[1m]")
+	value = strings.TrimPrefix(value, "models/")
+	return strings.TrimPrefix(value, "google/")
+}
 
 // SetModelMapping 替换当前模型别名映射
 func SetModelMapping(mapping map[string]string) {

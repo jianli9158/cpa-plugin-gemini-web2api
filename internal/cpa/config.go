@@ -29,6 +29,7 @@ type PluginConfig struct {
 	GuestEnabled          *bool             `json:"guest_enabled" yaml:"guest_enabled"`
 	ModelMapping          string            `json:"model_mapping" yaml:"model_mapping"`
 	ModelAliases          map[string]string `json:"model_aliases" yaml:"model_aliases"`
+	HiddenModels          *string           `json:"hidden_models" yaml:"hidden_models"`
 	AccountCooldown       string            `json:"account_cooldown" yaml:"account_cooldown"`
 	SessionTTL            string            `json:"session_ttl" yaml:"session_ttl"`
 	InitTimeout           string            `json:"init_timeout" yaml:"init_timeout"`
@@ -93,6 +94,9 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 			}
 			if len(pcfg.ModelAliases) == 0 {
 				pcfg.ModelAliases = opt.ModelAliases
+			}
+			if pcfg.HiddenModels == nil {
+				pcfg.HiddenModels = opt.HiddenModels
 			}
 			if pcfg.AccountCooldown == "" {
 				pcfg.AccountCooldown = opt.AccountCooldown
@@ -255,6 +259,11 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 			modelAccounts = parsed
 		}
 	}
+	hiddenRaw := config.Defaults["HIDDEN_MODELS"]
+	if pcfg.HiddenModels != nil {
+		hiddenRaw = *pcfg.HiddenModels
+	}
+	hiddenModels := config.NormalizeHiddenModels(hiddenRaw)
 
 	cfg := config.Config{
 		AuthStatePaths:        []string{accountsDir},
@@ -267,6 +276,7 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, string, error) 
 		AccountOrder:          accountOrder,
 		ModelAccounts:         modelAccounts,
 		ModelMapping:          modelMapping,
+		HiddenModels:          hiddenModels,
 		SaveHistory:           boolOrDefault(pcfg.SaveHistory, false),
 		ContinueSession:       boolOrDefault(pcfg.ContinueSession, false),
 		NonstreamKeepalive:    true,

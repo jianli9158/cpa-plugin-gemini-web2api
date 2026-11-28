@@ -293,8 +293,14 @@ func (p *Plugin) handleRegister(raw []byte) (any, error) {
 				{
 					Name:        "first_event_hedge_models",
 					Type:        pluginapi.ConfigFieldTypeString,
-					Default:     "gemini-4-carbon,gemini-4-argon",
+					Default:     config.Defaults["FIRST_EVENT_HEDGE_MODELS"],
 					Description: "Comma-separated model IDs eligible for first-event backup hedging",
+				},
+				{
+					Name:        "hidden_models",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Default:     config.Defaults["HIDDEN_MODELS"],
+					Description: "Comma-separated model IDs (or predefined-gems) hidden from public API; set empty string to expose all",
 				},
 			},
 		},

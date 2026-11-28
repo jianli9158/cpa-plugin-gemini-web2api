@@ -692,6 +692,7 @@ func runGenerationWithClient(
 	continuation := false
 	branch := false
 	contextTokens := 0
+	existingCID := ""
 	if sessionKey != "" {
 		var boundAccountID string
 		var ok bool
@@ -705,12 +706,15 @@ func runGenerationWithClient(
 			boundAccountID = accountID
 		} else {
 			continuation = true
-			branch = !conversations.isLatest(conversation.Snapshot())
+			snapshot := conversation.Snapshot()
+			existingCID = snapshot.CID
+			branch = !conversations.isLatest(snapshot)
 		}
 		if boundAccountID != accountID {
 			return generationResult{}, &sessionAccountChangedError{err: &gemini.ProtocolError{HTTPStatus: 409, Message: "会话绑定账号已变化，请开始新会话"}}
 		}
 	}
+	defer conversations.hold(existingCID)()
 	prompt, files, err := prepare(client, continuation)
 	trace.SetMedia(len(files))
 	if err != nil {
@@ -818,6 +822,7 @@ func runGenerationWithClient(
 		}
 		return nil
 	}
+	var createdSessions []gemini.ConversationSnapshot
 	err = client.Stream(streamCtx, gemini.GenerateRequest{
 		Prompt:        prompt,
 		Model:         model.ID,
@@ -828,9 +833,33 @@ func runGenerationWithClient(
 		Conversation:  conversation,
 		Branch:        branch,
 		ClientTools:   len(bridge.Definitions) > 0,
+		OnSession: func(snapshot gemini.ConversationSnapshot) {
+			if snapshot.CID != "" {
+				createdSessions = append(createdSessions, snapshot)
+			}
+		},
 	}, handle)
-	if len(bridge.Definitions) > 0 && client.TemporaryChats() && accumulator.Session.CID != "" {
-		conversations.markTemporary(accumulator.Session, accountID)
+	if len(createdSessions) == 0 && accumulator.Session.CID != "" {
+		createdSessions = append(createdSessions, accumulator.Session)
+	}
+	isTask := model.Feature == gemini.FeatureTask || feature == gemini.FeatureTask
+	deleteLevel := thinkingLevel
+	if deleteLevel == 0 && len(model.ThinkingLevels) > 0 {
+		deleteLevel = model.ThinkingLevels[0]
+	}
+	for _, snapshot := range createdSessions {
+		if snapshot.CID == "" {
+			continue
+		}
+		if !conversations.isTemporary(snapshot.CID) {
+			if snapshot.CID == existingCID || !client.TemporaryChats() || len(bridge.Definitions) == 0 && !isTask {
+				continue
+			}
+		}
+		if snapshot.ModelMode == 0 {
+			snapshot.ModelMode = model.Mode
+		}
+		conversations.markTemporaryChat(snapshot, accountID, model.Variant, deleteLevel)
 	}
 	if err == nil {
 		if rest := aligner.finish(); rest != "" {

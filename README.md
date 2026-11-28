@@ -65,11 +65,11 @@ flowchart LR
 
 ### 方式二：从 GitHub Releases 下载预编译包
 1. 前往 [Releases](https://github.com/jianli9158/cpa-plugin-gemini-web2api/releases) 下载对应平台的压缩包：
-   - macOS Apple Silicon: `gemini-web2api_1.0.11_darwin_arm64.zip`
-   - macOS Intel: `gemini-web2api_1.0.11_darwin_amd64.zip`
-   - Linux x86_64: `gemini-web2api_1.0.11_linux_amd64.zip`
-   - Linux ARM64: `gemini-web2api_1.0.11_linux_arm64.zip`
-   - Windows x86_64: `gemini-web2api_1.0.11_windows_amd64.zip`
+   - macOS Apple Silicon: `gemini-web2api_1.0.12_darwin_arm64.zip`
+   - macOS Intel: `gemini-web2api_1.0.12_darwin_amd64.zip`
+   - Linux x86_64: `gemini-web2api_1.0.12_linux_amd64.zip`
+   - Linux ARM64: `gemini-web2api_1.0.12_linux_arm64.zip`
+   - Windows x86_64: `gemini-web2api_1.0.12_windows_amd64.zip`
 2. 解压出动态库文件（`gemini-web2api.dylib` / `gemini-web2api.so` / `gemini-web2api.dll`），放入 CLIProxyAPI 的插件目录：
    ```text
    plugins/<goos>/<goarch>/gemini-web2api.{dylib,so,dll}

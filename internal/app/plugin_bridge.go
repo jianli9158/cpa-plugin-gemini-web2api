@@ -27,7 +27,7 @@ const dataDir = "data"
 
 // Version returns the plugin runtime version.
 func Version() string {
-	return "1.0.11"
+	return "1.0.12"
 }
 
 func authDir(paths []string) string {
@@ -89,7 +89,7 @@ func NewPluginRuntime(ctx context.Context, cfg config.Config, runtimeDataDir str
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 
-	_ = logging.Setup(logging.Options{
+	logging.Setup(logging.Options{
 		Level:  cfg.LogLevel,
 		Format: cfg.LogFormat,
 		Writer: io.Discard,
@@ -127,34 +127,9 @@ func NewPluginRuntime(ctx context.Context, cfg config.Config, runtimeDataDir str
 	}
 
 	config.SetModelMapping(cfg.ModelMapping)
+	config.SetHiddenModels(cfg.HiddenModels)
 	adapter.ConfigureSessionTTL(cfg.SessionTTL)
 	pool := balancer.NewAccountPool(cfg.AccountCooldown, cfg.SessionTTL)
-	if stored, err := store.Cooldowns(runtimeCtx, time.Now()); err == nil && len(stored) > 0 {
-		restored := make([]balancer.Cooldown, 0, len(stored))
-		for _, sc := range stored {
-			restored = append(restored, balancer.Cooldown{
-				Account: sc.Account,
-				Model:   sc.Model,
-				Until:   sc.Until,
-				Reason:  sc.Reason,
-			})
-		}
-		pool.RestoreCooldowns(restored)
-	}
-	pool.OnCooldownChange(func(cooldowns []balancer.Cooldown) {
-		stored := make([]requestdb.StoredCooldown, 0, len(cooldowns))
-		for _, c := range cooldowns {
-			stored = append(stored, requestdb.StoredCooldown{
-				Account: c.Account,
-				Model:   c.Model,
-				Until:   c.Until,
-				Reason:  c.Reason,
-			})
-		}
-		if err := store.SaveCooldowns(runtimeCtx, stored); err != nil {
-			logging.Warn(logging.SourceService, "保存账号冷却失败", "错误", err)
-		}
-	})
 	pool.SetStrategy(cfg.RoutingStrategy)
 	pool.SetAccountOrder(cfg.AccountOrder)
 	pool.SetModelAccounts(cfg.ModelAccounts)
@@ -239,11 +214,10 @@ func (rt *PluginRuntime) ApplyConfig(next config.Config, guestEnabled bool) {
 	rt.Cfg = next
 	rt.startMu.Unlock()
 	config.SetModelMapping(next.ModelMapping)
+	config.SetHiddenModels(next.HiddenModels)
 	rt.Pool.SetTimings(next.AccountCooldown, next.SessionTTL)
 	adapter.ConfigureSessionTTL(next.SessionTTL)
-	if level, err := logging.ParseLevel(next.LogLevel); err == nil {
-		logging.SetLevel(level)
-	}
+	logging.SetLevel(logging.Level(next.LogLevel))
 	rt.Store.SetBodyCapture(next.RequestBodyLog)
 	rt.Pool.SetStrategy(next.RoutingStrategy)
 	rt.Pool.SetAccountOrder(next.AccountOrder)
